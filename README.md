@@ -1,144 +1,60 @@
-## Version 1.6.3 — Mise à jour Starlink
+# W-A Systeme de Gestion — v1.7.1 (Cloud initial)
 
-**Attention : la synchronisation cloud n'est pas encore activée.** Cette version utilise encore le serveur LAN/SQLite existant. Consultez `SUPABASE_MIGRATION_NEXT_STEPS.md` avant de prévoir un usage entre sites distants.
+## État de cette version
 
-# W-A Systeme de Gestion v1.6.0 — GPS simplifié + LAN sécurisé
+Cette version introduit un **mode Cloud Supabase optionnel**. La connexion Cloud utilise Supabase Auth (e-mail/mot de passe) et les données sont lues/écrites dans PostgreSQL via l'API Supabase. Chaque PC lance son interface locale sur `127.0.0.1`; aucun laptop n'a besoin de rester allumé comme serveur LAN lorsque le mode Cloud est configuré.
 
-Version Windows avec interface entièrement en français, autorisations utilisateurs et fonctionnement LAN/WLAN pour 1 serveur + jusqu'à 2 PC clients.
+**Important : cette intégration initiale doit être testée avant usage quotidien.** Elle ne migre pas automatiquement les anciennes données SQLite. Gardez l'ancienne installation LAN disponible jusqu'à ce que l'import et les tests soient validés.
 
-## 1. Nouvelle saisie GPS
+## Fonctionnalités conservées
 
-Pour une vente GPS, les champs sont maintenant :
+- Interface entièrement en français et thème clair.
+- GPS : nom du client, téléphone, numéro SIM, type Moto/Voiture/Camion, adresse, montant saisi manuellement, SIM + activation à 3 000 FCFA (inclut le premier mois), abonnements supplémentaires à 3 000 FCFA/mois, date/heure, abonnement effectué, note.
+- Calcul GPS : `Total à payer = Montant + 3 000 + (Nombre d’abonnements supplémentaires × 3 000)`.
+- Starlink : uniquement Type d’appareil, Montant à payer, Date et heure, Note.
+- Ventes et dépôts : ajout, modification et suppression.
+- Rôles : RH, Gestionnaire, Administrateur.
+- Gestion des comptes centralisée via la fonction Edge `admin-users` en mode Cloud.
+- Le mode LAN/SQLite reste disponible si aucun fichier de configuration Cloud n'est présent.
 
-- Nom du client
-- Numéro de téléphone
-- Montant — **saisi manuellement**, vide par défaut
-- Numéro du SIM
-- Type du GPS : **Moto / Voiture / Camion**
-- Adresse
-- SIM + Activation : **3 000 FCFA** (inclut le premier mois)
-- Abonnement : **3 000 FCFA / mois**
-- Date et heure
-- Nombre d'abonnement
-- Total d'abonnement — calculé automatiquement : 3 000 × nombre de mois
-- Abonnement effectué : Oui / Non
-- Note
+## Pré-requis Cloud
 
-### Champs retirés de la saisie GPS
+1. Le schéma `supabase/migrations/0001_initial_schema.sql` a été appliqué au projet.
+2. La fonction `supabase/functions/admin-users/index.ts` a été déployée sous le nom `admin-users`.
+3. Le compte `admin@wasystem.com` existe dans Supabase Auth et son profil a le rôle `Administrateur`.
+4. Les employés ont chacun un compte Auth/profil et un mot de passe valide.
+5. Les inscriptions publiques restent désactivées.
 
-- Prix d'installation
-- Abonnement réel / mois
-- Avantage / remise
-- Activation du mois suivant
-- Dépense / jour
-- Installé par
-- Ancien numéro de téléphone de l'appareil
+## Configurer un PC de test
 
-Les anciennes colonnes SQLite restent uniquement pour permettre la migration des anciennes données; elles ne sont plus affichées ni saisies.
+1. Exécutez `build_exe.bat` sur le PC de développement avec **Python 3.12 x64**.
+2. Copiez le dossier complet `dist/W-A Systeme de Gestion` sur un seul PC de test.
+3. Lancez `configure_cloud.bat`.
+4. Entrez l'URL du projet Supabase (par exemple `https://<project-ref>.supabase.co`) et la clé **Publishable** ou l'ancienne clé **anon** depuis les paramètres API du projet.
+5. Ne saisissez jamais une clé `Secret` / `service_role`.
+6. Lancez `W-A Systeme de Gestion.exe`.
+7. Le statut devrait afficher **Cloud connecté**. Connectez-vous avec l'adresse e-mail Supabase et le mot de passe d'un compte existant.
 
-## 2. Modification et suppression
+Chaque PC doit effectuer cette configuration, car `cloud_config.json` est stocké dans le profil Windows de chaque utilisateur à `%USERPROFILE%\WA_Manager_System\cloud_config.json`.
 
-Les boutons **Modifier** et **Supprimer** restent disponibles dans le registre des ventes et dans Finance / Dépôts.
+## Sécurité
 
-- RH : opérations courantes et modification/suppression des ventes et dépôts.
-- Gestionnaire : opérations courantes et modification/suppression des ventes et dépôts.
-- Administrateur : toutes les opérations + gestion des utilisateurs.
+- La clé Publishable/anon peut être intégrée côté client si les politiques Row Level Security (RLS) sont appliquées.
+- La clé Secret/service-role ne doit jamais être dans le desktop, le dépôt GitHub, une capture d'écran ou un fichier de configuration client.
+- La fonction `admin-users` vérifie le rôle Administrateur côté serveur avant toute gestion des comptes.
+- Les policies RLS limitent l'accès aux utilisateurs authentifiés. Ne réactivez pas les inscriptions publiques sans une nouvelle revue des permissions.
 
-Seul l'**Administrateur** peut créer, modifier ou supprimer un utilisateur.
+## Migration des données historiques
 
-## 3. Réseau : 1 serveur + 1 ou 2 clients
+Le mode Cloud démarre sur les tables Supabase; il ne copie pas automatiquement le fichier local `%USERPROFILE%\WA_Manager_System\wa_manager.db`. Ne supprimez pas cette base. La prochaine étape est de préparer un import contrôlé SQLite → Supabase, puis de rapprocher les nombres de ventes/dépôts et les montants avant le basculement définitif.
 
-Le modèle recommandé est :
+## Build Windows
 
-```text
-                    Réseau privé LAN/WLAN
-                           │
-                 ┌─────────┴─────────┐
-                 │                   │
-          PC 1 — SERVEUR       PC 2 — CLIENT
-          Base de données      W-A Systeme de Gestion
-                 │
-                 └────────────── PC 3 — CLIENT (optionnel)
+```bat
+build_exe.bat
 ```
 
-La base SQLite reste uniquement sur le serveur. Les clients utilisent le serveur via HTTP; ils ne partagent jamais directement le fichier `.db`.
+Le build crée `dist/W-A Systeme de Gestion/W-A Systeme de Gestion.exe`. Distribuez le dossier complet (pas seulement l'EXE) aux PC. Les clients n'ont pas à exécuter `build_exe.bat`.
 
-### Limitation d'accès
-
-v1.6.0 ajoute une liste blanche IP côté serveur. Elle permet d'autoriser seulement **1 ou 2 PC clients**.
-
-Le fichier serveur est :
-
-`%USERPROFILE%\WA_Manager_System\lan_access.json`
-
-Exemple pour deux clients :
-
-```json
-{
-  "enabled": true,
-  "max_clients": 2,
-  "allowed_ips": ["192.168.50.2", "192.168.50.3"]
-}
-```
-
-Une machine dont l'IP n'est pas dans cette liste reçoit un refus d'accès, même si elle connaît l'adresse du serveur.
-
-## 4. Configuration recommandée — Wi-Fi / routeur
-
-C'est la méthode la plus simple.
-
-1. Connecter le serveur et les 1–2 clients au **même Wi-Fi ou même switch/routeur**.
-2. Mettre le réseau Windows en **Privé**.
-3. Donner des adresses IP fixes ou des réservations DHCP aux PC. Exemple :
-   - Serveur : `192.168.50.1`
-   - Client 1 : `192.168.50.2`
-   - Client 2 : `192.168.50.3`
-4. Sur le serveur, lancer `setup_firewall.bat` avec **Exécuter en tant qu'administrateur**.
-5. Sur le serveur, lancer `configure_lan_access.bat` et saisir les IP des PC clients.
-6. Lancer W-A Systeme de Gestion sur le serveur.
-7. Lancer W-A Systeme de Gestion sur les clients.
-8. Le serveur doit afficher **Serveur LAN** et les autres **LAN connecté**.
-
-Internet n'est pas nécessaire pour le fonctionnement de l'application sur le réseau local.
-
-## 5. Connexion directe Ethernet entre PC
-
-Pour deux PC reliés directement par câble Ethernet, utiliser par exemple :
-
-- Serveur : IP `192.168.50.1`, masque `255.255.255.0`
-- Client : IP `192.168.50.2`, masque `255.255.255.0`
-
-Pour trois PC, utiliser `192.168.50.3` pour le deuxième client.
-
-Aucun Internet n'est nécessaire.
-
-## 6. Ports
-
-- Application : TCP **8765**
-- Découverte LAN : UDP **8766**
-
-Le pare-feu doit autoriser ces ports sur le profil **Privé**.
-
-## 7. Fichiers utiles
-
-- `setup_firewall.bat` — ouvre les ports LAN nécessaires.
-- `configure_lan_access.bat` — configure les PC clients autorisés.
-- `reset_network_config.bat` — réinitialise la configuration automatique LAN.
-- `lan_access_example.json` — exemple de liste blanche.
-
-## 8. Sauvegardes
-
-Les sauvegardes automatiques de la base serveur sont conservées dans :
-
-`%USERPROFILE%\WA_Manager_System\backups`
-
-Les 14 sauvegardes les plus récentes sont conservées.
-
-## 9. Nom et icône de l’application
-
-Le logiciel est distribué sous le nom **W-A Systeme de Gestion** avec l’icône officielle fournie.
-
-> Compatibilité : le dossier interne `%USERPROFILE%\WA_Manager_System` est conservé volontairement afin que les installations précédentes retrouvent leurs données existantes.
-
-### Starlink form (v1.6.4)
-For Starlink sales, the form displays only **Montant à payer**, **Date et heure**, and **Note** (in addition to the device type selector). GPS-specific fields remain hidden. These same fields are available when editing a Starlink sale.
+## Hotfix v1.7.1
+Fixed a missing `re` import that caused the error `name 're' is not defined` when attempting cloud save/edit/delete operations. Rebuild the executable from this source; the existing cloud configuration remains in `%USERPROFILE%\WA_Manager_System\cloud_config.json`.

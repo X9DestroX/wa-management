@@ -1,0 +1,13 @@
+build/
+dist/
+__pycache__/
+.venv/
+venv/
+*.db
+*.db-wal
+*.db-shm
+.env
+.env.*
+!.env.example
+# Cloud client config must stay local (publishable key only, no secrets)
+cloud_config.json

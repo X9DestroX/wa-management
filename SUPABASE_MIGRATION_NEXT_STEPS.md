@@ -26,3 +26,16 @@ When Type d'appareil is Starlink, the form shows only:
 - Montant à payer
 
 The same conditional behavior is applied in the edit-sale dialog. Existing historical Starlink data is not deleted.
+
+
+## Step 5 — Cloud mode in v1.7.0
+
+The optional cloud gateway is now included in `wa_manager.py`. It uses a per-laptop `cloud_config.json` stored in `%USERPROFILE%\\WA_Manager_System`; `configure_cloud.bat` creates it using the project URL and a publishable/anon key.
+
+Cloud mode currently connects:
+- Supabase Auth password login (email/password)
+- `public.profiles` for profile/role lookup
+- `public.sales` and `public.deposits` for reads and writes
+- Edge Function `admin-users` for administrator account management
+
+**Important:** test on one non-production laptop first. This release does not automatically import the local SQLite DB. Verify sign-in, CRUD, roles, date/time handling, and user management before using it for live transactions. The existing SQLite/LAN database is preserved.

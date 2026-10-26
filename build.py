@@ -81,6 +81,12 @@ internal = DIST / 'W-A Systeme de Gestion' / '_internal'
 if not exe.exists():
     raise SystemExit('BUILD FAILED: executable was not created.')
 
+# Copy first-run Cloud setup guides/scripts beside the packaged application.
+for setup_name in ('configure_cloud.bat', 'configure_cloud.ps1', 'CLOUD_SETUP_FR.md'):
+    source = ROOT / setup_name
+    if source.exists():
+        shutil.copy2(source, DIST / 'W-A Systeme de Gestion' / setup_name)
+
 # Make a tiny launcher beside the EXE for users who prefer double-clicking a batch file.
 launcher = DIST / 'START W-A SYSTEME DE GESTION.bat'
 launcher.write_text(
