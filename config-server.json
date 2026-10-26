@@ -1,0 +1,6 @@
+{
+  "server": "",
+  "port": 8765,
+  "server_mode": false,
+  "network_mode": "auto"
+}

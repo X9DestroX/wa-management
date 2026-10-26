@@ -1,0 +1,8 @@
+{
+  "enabled": true,
+  "max_clients": 2,
+  "allowed_ips": [
+    "192.168.50.2",
+    "192.168.50.3"
+  ]
+}
