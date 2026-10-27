@@ -1,0 +1,16 @@
+PROJECT_URL=https://dmafcvfsuoobtkgqqedy.supabase.co
+SB_PUBLISHABLE=sb_publishable__mUoeIWIvsay1th7MDvuqA_EZRqY4bw
+
+supabase password=WA(junior)002026
+
+hr@wasystem.com
+Hr@2026wa
+
+admin@wasystem.com
+Admin@2026wa
+
+finance@wasystem.com
+Finance@2026wa
+
+desk@wasystem.com
+Desk@2026wa

@@ -9,6 +9,7 @@
 
 ## Pré-requis de cloud
 - Migration SQL Step 1 appliquée.
+- Pour la v1.7.3, la migration `0002_company_expenses.sql` doit aussi être appliquée avant d’ouvrir Finance / Dépôts ou Rapports.
 - Comptes Supabase Auth et profils créés.
 - Fonction Edge `admin-users` déployée.
 - Dans `public.profiles`, `admin@wasystem.com` doit avoir `role='Administrateur'`.
@@ -32,3 +33,7 @@ Cette étape ne migre pas les anciennes données du fichier SQLite. La base loca
 - Chaque laptop doit exécuter une version contenant le support Cloud et disposer de son propre fichier de configuration dans `%USERPROFILE%\WA_Manager_System\cloud_config.json`.
 - Les comptes sont gérés via `admin-users`, jamais par clé secret côté desktop.
 - Les tables `sales` et `deposits` doivent avoir les policies RLS créées à Step 1.
+
+
+## Mise à jour v1.7.3 — Dépenses et rapports PDF
+Avant de compiler v1.7.3, exécutez `supabase/migrations/0002_company_expenses.sql` dans le SQL Editor de Supabase pour créer la table `expenses`. Consultez `REPORTS_EXPENSES_SETUP_FR.md`.

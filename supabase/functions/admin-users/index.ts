@@ -7,7 +7,16 @@ const corsHeaders = {
   "Content-Type": "application/json; charset=utf-8",
 };
 
-const allowedRoles = new Set(["RH", "Gestionnaire", "Administrateur"]);
+const regularRoles = new Set(["RH", "Gestionnaire", "Administrateur"]);
+const systemSuperadminUsername = "destrox";
+
+function isSystemSuperadmin(profile: { username?: string; role?: string } | null | undefined): boolean {
+  return String(profile?.username ?? "").toLowerCase() === systemSuperadminUsername && profile?.role === "Superadmin";
+}
+
+function isProtectedSuperadmin(profile: { username?: string; role?: string } | null | undefined): boolean {
+  return String(profile?.username ?? "").toLowerCase() === systemSuperadminUsername || profile?.role === "Superadmin";
+}
 
 function response(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: corsHeaders });
@@ -75,8 +84,10 @@ Deno.serve(async (req: Request) => {
       .eq("id", authData.user.id)
       .maybeSingle();
 
-    if (actorError || !actor || actor.role !== "Administrateur") {
-      return response({ error: "Accès réservé à l’administrateur." }, 403);
+    const actorIsSuperadmin = isSystemSuperadmin(actor);
+    const actorCanManageUsers = actorIsSuperadmin || actor?.role === "Administrateur";
+    if (actorError || !actor || !actorCanManageUsers) {
+      return response({ error: "Accès réservé à l’administrateur ou au Superadmin système." }, 403);
     }
 
     let body: Record<string, unknown>;
@@ -120,7 +131,10 @@ Deno.serve(async (req: Request) => {
       if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return response({ error: "Adresse e-mail invalide." }, 400);
       if (!username || !/^[A-Za-z0-9._-]{2,64}$/.test(username)) return response({ error: "Nom d’utilisateur invalide (2–64 caractères : lettres, chiffres, point, tiret ou souligné)." }, 400);
       if (password.length < 12) return response({ error: "Le mot de passe doit contenir au moins 12 caractères." }, 400);
-      if (!allowedRoles.has(role)) return response({ error: "Rôle invalide." }, 400);
+      if (!regularRoles.has(role)) return response({ error: "Rôle invalide. Le rôle Superadmin ne peut pas être créé depuis le formulaire." }, 400);
+      if (username.toLowerCase() === systemSuperadminUsername) {
+        return response({ error: "Le nom d’utilisateur destrox est réservé au Superadmin système." }, 409);
+      }
 
       const { data: duplicate, error: duplicateError } = await adminClient.from("profiles").select("id").eq("username", username).maybeSingle();
       if (duplicateError) return response({ error: "Impossible de vérifier le nom d’utilisateur." }, 500);
@@ -148,8 +162,16 @@ Deno.serve(async (req: Request) => {
 
       await adminClient.from("audit").insert({
         username: actor.username,
-        action: "admin-users:create",
+        action: "Création d’un utilisateur",
         details: { target_id: created.user.id, email, username, role },
+        actor_id: actor.id,
+        actor_email: authData.user.email ?? null,
+        actor_role: actor.role,
+        entity_table: "profiles",
+        entity_id: created.user.id,
+        operation: "INSERT",
+        before_data: null,
+        after_data: { username, full_name: fullName, email, role },
       });
 
       return response({ ok: true, user_id: created.user.id, message: "Utilisateur créé." }, 201);
@@ -164,6 +186,10 @@ Deno.serve(async (req: Request) => {
         .eq("id", id)
         .maybeSingle();
       if (targetError || !target) return response({ error: "Utilisateur introuvable." }, 404);
+      const targetIsProtected = isProtectedSuperadmin(target);
+      if (targetIsProtected && !actorIsSuperadmin) {
+        return response({ error: "Le compte Superadmin destrox est protégé. Seul le Superadmin peut modifier ses informations." }, 403);
+      }
 
       const username = cleanString(body.username ?? target.username, 64);
       const fullName = cleanString(body.full_name ?? target.full_name, 120);
@@ -172,17 +198,25 @@ Deno.serve(async (req: Request) => {
       const password = typeof body.password === "string" ? body.password : "";
 
       if (!username || !/^[A-Za-z0-9._-]{2,64}$/.test(username)) return response({ error: "Nom d’utilisateur invalide." }, 400);
-      if (!allowedRoles.has(role)) return response({ error: "Rôle invalide." }, 400);
       if (password && password.length < 12) return response({ error: "Le nouveau mot de passe doit contenir au moins 12 caractères." }, 400);
       if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return response({ error: "Adresse e-mail invalide." }, 400);
-      if (id === actor.id && role !== "Administrateur") return response({ error: "Vous ne pouvez pas retirer votre propre rôle Administrateur." }, 400);
+
+      if (targetIsProtected) {
+        if (username.toLowerCase() !== systemSuperadminUsername || role !== "Superadmin") {
+          return response({ error: "Le nom d’utilisateur et le rôle du Superadmin système ne peuvent pas être modifiés." }, 400);
+        }
+      } else {
+        if (!regularRoles.has(role)) return response({ error: "Rôle invalide. Le rôle Superadmin est réservé au compte destrox." }, 400);
+        if (username.toLowerCase() === systemSuperadminUsername) return response({ error: "Le nom d’utilisateur destrox est réservé." }, 409);
+      }
+      if (id === actor.id && !actorIsSuperadmin && role !== "Administrateur") return response({ error: "Vous ne pouvez pas retirer votre propre rôle Administrateur." }, 400);
 
       const { data: duplicate, error: duplicateError } = await adminClient.from("profiles")
         .select("id").eq("username", username).neq("id", id).maybeSingle();
       if (duplicateError) return response({ error: "Impossible de vérifier le nom d’utilisateur." }, 500);
       if (duplicate) return response({ error: "Ce nom d’utilisateur est déjà utilisé." }, 409);
 
-      if (target.role === "Administrateur" && role !== "Administrateur") {
+      if (!actorIsSuperadmin && target.role === "Administrateur" && role !== "Administrateur") {
         const { count, error: countError } = await adminClient.from("profiles")
           .select("id", { count: "exact", head: true }).eq("role", "Administrateur");
         if (countError) return response({ error: "Impossible de vérifier les administrateurs existants." }, 500);
@@ -209,8 +243,16 @@ Deno.serve(async (req: Request) => {
 
       await adminClient.from("audit").insert({
         username: actor.username,
-        action: "admin-users:update",
+        action: "Modification d’un utilisateur",
         details: { target_id: id, username, role, email_changed: Boolean(email), password_changed: Boolean(password) },
+        actor_id: actor.id,
+        actor_email: authData.user.email ?? null,
+        actor_role: actor.role,
+        entity_table: "profiles",
+        entity_id: id,
+        operation: "UPDATE",
+        before_data: { username: target.username, full_name: target.full_name, role: target.role },
+        after_data: { username, full_name: fullName, role, email_changed: Boolean(email), password_changed: Boolean(password) },
       });
       return response({ ok: true, message: "Utilisateur mis à jour." });
     }
@@ -223,8 +265,11 @@ Deno.serve(async (req: Request) => {
       const { data: target, error: targetError } = await adminClient.from("profiles")
         .select("id, username, role").eq("id", id).maybeSingle();
       if (targetError || !target) return response({ error: "Utilisateur introuvable." }, 404);
+      if (isProtectedSuperadmin(target)) {
+        return response({ error: "Le compte Superadmin destrox est protégé et ne peut être supprimé par personne." }, 403);
+      }
 
-      if (target.role === "Administrateur") {
+      if (!actorIsSuperadmin && target.role === "Administrateur") {
         const { count, error: countError } = await adminClient.from("profiles")
           .select("id", { count: "exact", head: true }).eq("role", "Administrateur");
         if (countError) return response({ error: "Impossible de vérifier les administrateurs existants." }, 500);
@@ -236,8 +281,16 @@ Deno.serve(async (req: Request) => {
 
       await adminClient.from("audit").insert({
         username: actor.username,
-        action: "admin-users:delete",
+        action: "Suppression d’un utilisateur",
         details: { target_id: id, username: target.username, role: target.role },
+        actor_id: actor.id,
+        actor_email: authData.user.email ?? null,
+        actor_role: actor.role,
+        entity_table: "profiles",
+        entity_id: id,
+        operation: "DELETE",
+        before_data: { username: target.username, role: target.role },
+        after_data: null,
       });
       return response({ ok: true, message: "Utilisateur supprimé." });
     }

@@ -1,3 +1,32 @@
+## Version 1.7.4 — Journaux d’activité
+
+- Nouveau menu **Journaux d’activité**, réservé à l’Administrateur.
+- Trace les connexions réussies/déconnexions et chaque ajout, modification ou suppression de vente, dépôt, dépense et compte utilisateur.
+- Les événements métiers sont enregistrés par des déclencheurs PostgreSQL dans Supabase avec l’auteur, l’horodatage, l’élément concerné et les données avant/après.
+- Recherche dans les journaux et filtre par type d’événement.
+- Les mots de passe ne sont jamais consignés dans les détails d’audit.
+- **Migration obligatoire avant usage** : exécuter `supabase/migrations/0004_activity_audit.sql`, déployer la fonction Edge `auth-event`, puis mettre à jour la fonction `admin-users` à partir du code fourni.
+- Guide détaillé : `ACTIVITY_LOGS_SETUP_FR.md`.
+
+## Version 1.7.3.2 — Emplacement d’export PDF corrigé
+
+L’export PDF est maintenant enregistré directement dans le dossier **Téléchargements Windows** du PC qui génère le rapport. Après l’export, une boîte de dialogue affiche le nom du fichier et son chemin complet. Cela évite que le téléchargement créé par le navigateur intégré (pywebview) soit difficile à retrouver.
+
+Le dossier Windows Téléchargements configuré par l’utilisateur est respecté, y compris s’il est redirigé.
+
+## Version 1.7.3 — Rapports PDF et dépenses d’entreprise
+
+- Nouveau menu **Rapports** avec période hebdomadaire (du lundi au dimanche) ou mensuelle (mois civil).
+- Export PDF multipage comprenant la synthèse des ventes GPS/Starlink, chiffre d’affaires, abonnements, dépôts financiers, dépenses d’entreprise, dépenses historiques associées aux ventes et position opérationnelle.
+- Nouveau registre des dépenses d’entreprise dans **Finance / Dépôts** : montant, date, catégorie, mode de paiement, bénéficiaire, référence et notes, avec modification/suppression.
+- Le tableau de bord tient compte des nouvelles dépenses d’entreprise.
+- **Migration obligatoire avant usage** : exécuter `supabase/migrations/0002_company_expenses.sql` dans le SQL Editor de Supabase.
+- Export PDF généré sur le PC à partir des données déjà récupérées avec la session employé; aucune clé secrète n’est ajoutée au desktop.
+
+## Version 1.7.2 — Registre Starlink simplifié
+
+Le registre complet des ventes est maintenant séparé en deux sections : les ventes GPS conservent leurs colonnes détaillées, tandis que les ventes Starlink affichent uniquement **Type d’appareil**, **Montant à payer**, **Date et heure** et **Note**, avec la colonne **Actions** pour Modifier/Supprimer.
+
 # W-A Systeme de Gestion — v1.7.1 (Cloud initial)
 
 ## État de cette version
@@ -58,3 +87,12 @@ Le build crée `dist/W-A Systeme de Gestion/W-A Systeme de Gestion.exe`. Distrib
 
 ## Hotfix v1.7.1
 Fixed a missing `re` import that caused the error `name 're' is not defined` when attempting cloud save/edit/delete operations. Rebuild the executable from this source; the existing cloud configuration remains in `%USERPROFILE%\WA_Manager_System\cloud_config.json`.
+
+
+## v1.7.5.1 — Correction du nom Superadmin
+
+Le nom exact du compte système est `destrox`. Appliquez `supabase/migrations/0005_superadmin_protection.sql`, puis `supabase/migrations/PROMOTE_DESTROX_TEMPLATE.sql`, redéployez `supabase/functions/admin-users/index.ts` et reconstruisez l’application. Voir `SUPERADMIN_SETUP_FR.md`.
+
+## v1.7.5 — Superadmin système
+
+Voir `SUPERADMIN_SETUP_FR.md` pour ajouter le rôle `Superadmin`, déployer la fonction `admin-users` mise à jour, créer le compte Auth `destrox`, puis le promouvoir avec `supabase/migrations/PROMOTE_DESTROX_TEMPLATE.sql`. Le compte `destrox` ne peut pas être supprimé via l’application et ses identifiants/role sont protégés.

@@ -1,17 +1,29 @@
-# CHANGELOG
+# Changelog
 
-## 1.7.1 — Cloud CRUD hotfix
-- Fixed missing Python `re` import used by cloud API route matching.
-- Restores the cloud save/edit/delete routing paths for sales, deposits, and administrator-managed users.
-- No database schema change; no reconfiguration or SQLite migration is required.
+## v1.7.5.1 — Correction du nom Superadmin
+- Corrected the protected Superadmin username to the requested spelling `destrox` across the desktop UI, Python API, SQL protection, promotion template, and Edge Function.
+- Updated the UI, Python API checks, Supabase role-protection migration, promotion SQL template, and `admin-users` Edge Function.
+- No database records are migrated or deleted by this source correction.
 
-## 1.7.0 — Cloud mode initial
-- Added optional Supabase Cloud mode using email/password Supabase Auth.
-- Each desktop client serves its UI/API only on loopback; company data lives in Supabase.
-- Added cloud reads/writes for sales and deposits with existing GPS pricing and Starlink fields.
-- Routed employee management through the deployed `admin-users` Edge Function.
-- Added `configure_cloud.bat` / `.ps1` to configure URL and publishable key per PC.
-- Preserved existing LAN/SQLite mode if Cloud configuration is not present.
-- Added Supabase schema migration and Edge Function source to the repository.
+# Changelog
 
-Important: This is an initial cloud integration release. Existing local SQLite records are not automatically imported; keep the existing LAN version available until migration and acceptance testing are complete.
+## v1.7.5 — Superadmin système protégé
+- Added the permanent `destrox` / `Superadmin` system identity.
+- Administrators cannot edit or delete the protected Superadmin account.
+- A database trigger blocks deletion of the Superadmin profile and changes to its username/role, including Auth user deletion cascading to profiles.
+- Added Superadmin access to user administration and activity logs.
+- Superadmin can manage ordinary accounts and Administrators, including removing the last Administrator, but cannot delete itself or create another Superadmin through the app.
+- Added SQL to enable the role and a separate email-based profile promotion template.
+
+
+## v1.7.4 — Journaux d'activité
+- Added a French **Journaux d’activité** page, visible only to Administrateur.
+- Added central audit events for successful login and logout via a Supabase Edge Function.
+- Added database triggers to record insert/update/delete on sales, deposits and company expenses, with actor, timestamp and before/after snapshots.
+- Expanded user management audit entries through `admin-users`.
+- Added audit search and event-type filters.
+- Prevented passwords from being stored in local SQLite audit event details.
+- Kept current GPS/Starlink forms, PDF reports, cloud login and user roles.
+
+## v1.7.3.2
+- PDF export is written directly to the Windows Downloads folder with exact path confirmation.

@@ -120,6 +120,168 @@ def date_bounds(date_value):
     end=datetime.combine(day+timedelta(days=1),datetime.min.time()).replace(tzinfo=tz)
     return start.isoformat(timespec='seconds'),end.isoformat(timespec='seconds')
 
+
+def report_period(period, anchor):
+    """Return inclusive start/end dates and an easy-to-display French label."""
+    try: day=datetime.strptime(str(anchor), '%Y-%m-%d').date()
+    except Exception: day=datetime.now().date()
+    period='monthly' if str(period).lower() in ('monthly','month','mensuel','mensuelle') else 'weekly'
+    if period=='monthly':
+        start=day.replace(day=1)
+        end=(start.replace(day=28)+timedelta(days=4)).replace(day=1)-timedelta(days=1)
+        label='Rapport mensuel'
+    else:
+        start=day-timedelta(days=day.weekday())
+        end=start+timedelta(days=6)
+        label='Rapport hebdomadaire'
+    start_at,_=date_bounds(start.isoformat())
+    next_start,_=date_bounds((end+timedelta(days=1)).isoformat())
+    return {'period':period,'start_date':start.isoformat(),'end_date':end.isoformat(),
+            'start_at':start_at,'end_exclusive':next_start,
+            'label':label, 'anchor_date':day.isoformat()}
+
+
+def sum_field(rows, field):
+    return round(sum(num(row.get(field)) for row in rows), 2)
+
+
+def assemble_report(period_info, sales_rows, deposits_rows, expense_rows):
+    sales_rows=list(sales_rows or []); deposits_rows=list(deposits_rows or []); expense_rows=list(expense_rows or [])
+    gps=[x for x in sales_rows if str(x.get('device_type','')).upper()=='GPS']
+    star=[x for x in sales_rows if str(x.get('device_type','')).upper()=='STARLINK']
+    revenue=round(sum(num(x.get('total_amount') if x.get('total_amount') is not None else x.get('amount')) for x in sales_rows),2)
+    subscriptions=sum_field(sales_rows,'subscription')
+    sale_expenses=sum_field(sales_rows,'expenses')
+    company_expenses=sum_field(expense_rows,'amount')
+    total_expenses=round(sale_expenses+company_expenses,2)
+    deposits=sum_field(deposits_rows,'amount')
+    summary={
+        'sales_count':len(sales_rows),'gps_count':len(gps),'starlink_count':len(star),
+        'revenue':revenue,'subscriptions':subscriptions,'deposits':deposits,
+        'sale_expenses':sale_expenses,'company_expenses':company_expenses,
+        'total_expenses':total_expenses,'net_operating':round(revenue-total_expenses,2),
+        'expenses_count':len(expense_rows),'deposits_count':len(deposits_rows),
+    }
+    return {**period_info,'summary':summary,'sales':sales_rows,'deposits':deposits_rows,'expenses':expense_rows}
+
+
+def report_pdf_bytes(report):
+    """Generate a multi-page landscape PDF; the PDF is created locally from authorized report data."""
+    try:
+        from io import BytesIO
+        from xml.sax.saxutils import escape
+        from reportlab.lib import colors
+        from reportlab.lib.enums import TA_LEFT, TA_RIGHT
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import mm
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepTogether
+    except ImportError as e:
+        raise CloudAPIError('Export PDF indisponible. Relancez build_exe.bat avec les dépendances de la version 1.7.3.', 500) from e
+
+    buf=BytesIO()
+    doc=SimpleDocTemplate(buf,pagesize=landscape(A4),rightMargin=12*mm,leftMargin=12*mm,topMargin=12*mm,bottomMargin=13*mm,title=str(report.get('label','Rapport')))
+    styles=getSampleStyleSheet()
+    styles.add(ParagraphStyle(name='WASection',parent=styles['Heading2'],fontName='Helvetica-Bold',fontSize=11,leading=14,textColor=colors.HexColor('#12355b'),spaceBefore=10,spaceAfter=5))
+    styles.add(ParagraphStyle(name='WASmall',parent=styles['BodyText'],fontName='Helvetica',fontSize=7,leading=9,wordWrap='CJK'))
+    styles.add(ParagraphStyle(name='WAHeader',parent=styles['WASmall'],fontName='Helvetica-Bold',textColor=colors.white))
+    styles.add(ParagraphStyle(name='WATitle',parent=styles['Title'],fontName='Helvetica-Bold',fontSize=19,leading=22,textColor=colors.HexColor('#12355b'),alignment=TA_LEFT,spaceAfter=4))
+    styles.add(ParagraphStyle(name='WAMeta',parent=styles['BodyText'],fontName='Helvetica',fontSize=9,leading=12,textColor=colors.HexColor('#5d6878'),spaceAfter=8))
+
+    def fmt(v): return f"{num(v):,.0f} FCFA".replace(',', ' ')
+    def p(v, style='WASmall'):
+        value='-' if v is None or v=='' else str(v)
+        return Paragraph(escape(value).replace('\n','<br/>'),styles[style])
+    def make_table(headers, rows, widths, font=7):
+        data=[[Paragraph(escape(str(h)),styles['WAHeader']) for h in headers]]
+        for row in rows:
+            data.append([x if hasattr(x,'getPlainText') else p(x) for x in row])
+        table=Table(data,colWidths=widths,repeatRows=1,hAlign='LEFT')
+        table.setStyle(TableStyle([
+            ('BACKGROUND',(0,0),(-1,0),colors.HexColor('#12355b')),
+            ('TEXTCOLOR',(0,0),(-1,0),colors.white),
+            ('GRID',(0,0),(-1,-1),0.35,colors.HexColor('#dce3ed')),
+            ('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.white,colors.HexColor('#f6f8fb')]),
+            ('VALIGN',(0,0),(-1,-1),'TOP'),
+            ('LEFTPADDING',(0,0),(-1,-1),4),('RIGHTPADDING',(0,0),(-1,-1),4),
+            ('TOPPADDING',(0,0),(-1,-1),4),('BOTTOMPADDING',(0,0),(-1,-1),4),
+        ]))
+        return table
+
+    story=[]
+    story.append(Paragraph('W-A Systeme de Gestion',styles['WATitle']))
+    story.append(Paragraph(escape(str(report.get('label','Rapport')))+' — du '+escape(str(report.get('start_date','')))+' au '+escape(str(report.get('end_date',''))),styles['WAMeta']))
+    story.append(Paragraph('Synthèse financière',styles['WASection']))
+    sm=report['summary']
+    summary_rows=[
+        ['Ventes enregistrées',str(sm['sales_count']),'GPS',str(sm['gps_count']),'Starlink',str(sm['starlink_count'])],
+        ['Chiffre d’affaires',fmt(sm['revenue']),'Abonnements',fmt(sm['subscriptions']),'Dépôts financiers',fmt(sm['deposits'])],
+        ['Dépenses entreprise',fmt(sm['company_expenses']),'Dépenses des ventes',fmt(sm['sale_expenses']),'Total dépenses',fmt(sm['total_expenses'])],
+        ['Position opérationnelle',fmt(sm['net_operating']),'Dépôts enregistrés',str(sm['deposits_count']),'Dépenses enregistrées',str(sm['expenses_count'])],
+    ]
+    story.append(make_table(['Indicateur','Valeur','Indicateur','Valeur','Indicateur','Valeur'],summary_rows,[33*mm,31*mm,30*mm,31*mm,32*mm,31*mm]))
+    story.append(Paragraph('Détail des ventes',styles['WASection']))
+    gps_rows=[]; star_rows=[]; other_rows=[]
+    for x in report['sales']:
+        typ=str(x.get('device_type') or '').upper()
+        dt=str(x.get('sold_at') or '').replace('T',' ')[:16]
+        total=x.get('total_amount') if x.get('total_amount') is not None else x.get('amount')
+        if typ=='GPS':
+            gps_rows.append([dt,x.get('client_name') or '-',x.get('mobile') or '-',x.get('sim_number') or x.get('device_phone') or '-',x.get('gps_type') or '-',fmt(x.get('amount')),fmt(x.get('subscription')),fmt(total),x.get('address') or '-',x.get('notes') or '-'])
+        elif typ=='STARLINK':
+            star_rows.append([dt,fmt(x.get('amount')),x.get('notes') or '-'])
+        else:
+            other_rows.append([dt,x.get('device_type') or '-',fmt(total),x.get('notes') or '-'])
+    if gps_rows:
+        story.append(Paragraph('Ventes GPS',styles['Heading3']))
+        story.append(make_table(['Date et heure','Client','Téléphone','N° SIM','Type GPS','Montant','Abonnement','Total payé','Adresse','Note'],gps_rows,[22*mm,27*mm,20*mm,17*mm,13*mm,18*mm,18*mm,20*mm,36*mm,36*mm]))
+    if star_rows:
+        story.append(Paragraph('Ventes Starlink',styles['Heading3']))
+        story.append(make_table(['Date et heure','Montant à payer','Note'],star_rows,[45*mm,35*mm,160*mm]))
+    if other_rows:
+        story.append(Paragraph('Autres ventes',styles['Heading3']))
+        story.append(make_table(['Date et heure','Type','Total payé','Note'],other_rows,[45*mm,35*mm,35*mm,125*mm]))
+    if not report['sales']: story.append(Paragraph('Aucune vente enregistrée sur cette période.',styles['WAMeta']))
+
+    story.append(Paragraph('Dépôts financiers',styles['WASection']))
+    deposit_rows=[[str(x.get('created_at') or '').replace('T',' ')[:16],fmt(x.get('amount')),x.get('department') or 'Finance',x.get('reference') or '-',x.get('deposited_by') or '-',x.get('notes') or '-'] for x in report['deposits']]
+    story.append(make_table(['Date','Montant','Service','Référence','Déposé par','Notes'],deposit_rows,[24*mm,25*mm,27*mm,30*mm,28*mm,76*mm]) if deposit_rows else Paragraph('Aucun dépôt enregistré sur cette période.',styles['WAMeta']))
+
+    story.append(Paragraph('Dépenses de l’entreprise',styles['WASection']))
+    expense_rows=[[str(x.get('incurred_at') or '').replace('T',' ')[:16],fmt(x.get('amount')),x.get('category') or '-',x.get('paid_to') or '-',x.get('payment_method') or '-',x.get('reference') or '-',x.get('description') or x.get('notes') or '-'] for x in report['expenses']]
+    story.append(make_table(['Date','Montant','Catégorie','Bénéficiaire','Paiement','Référence','Description / notes'],expense_rows,[24*mm,25*mm,28*mm,29*mm,27*mm,29*mm,78*mm]) if expense_rows else Paragraph('Aucune dépense entreprise enregistrée sur cette période.',styles['WAMeta']))
+    if sm['sale_expenses']:
+        story.append(Paragraph('Dépenses associées aux ventes (anciens enregistrements)',styles['WASection']))
+        legacy=[ [str(x.get('sold_at') or '').replace('T',' ')[:16],x.get('device_type') or '-',fmt(x.get('expenses')),x.get('client_name') or x.get('device_name') or '-',x.get('notes') or '-'] for x in report['sales'] if num(x.get('expenses'))]
+        if legacy: story.append(make_table(['Date','Type','Dépense','Client / appareil','Note'],legacy,[30*mm,30*mm,30*mm,55*mm,155*mm]))
+    def footer(canvas, document):
+        canvas.saveState(); canvas.setFont('Helvetica',7); canvas.setFillColor(colors.HexColor('#7b8492'))
+        canvas.drawString(12*mm,7*mm,'Document généré par W-A Systeme de Gestion')
+        canvas.drawRightString(landscape(A4)[0]-12*mm,7*mm,'Page %d' % document.page)
+        canvas.restoreState()
+    doc.build(story,onFirstPage=footer,onLaterPages=footer)
+    return buf.getvalue()
+
+
+def cloud_period_rows(table, column, period_info, session):
+    """Fetch all records in a period in 1000-row pages to avoid silently truncating reports."""
+    out=[]; offset=0; limit=1000
+    date_filter='('+column+'.gte.'+period_info['start_at']+','+column+'.lt.'+period_info['end_exclusive']+')'
+    while True:
+        page=cloud_rest(table,{'select':'*','and':date_filter,'order':column+'.asc','limit':str(limit),'offset':str(offset)},session=session) or []
+        out.extend(page)
+        if len(page)<limit: break
+        offset += limit
+    return out
+
+
+def cloud_report(period, anchor, session):
+    info=report_period(period,anchor)
+    sales=cloud_period_rows('sales','sold_at',info,session)
+    deposits=cloud_period_rows('deposits','created_at',info,session)
+    expenses=cloud_period_rows('expenses','incurred_at',info,session)
+    return assemble_report(info,sales,deposits,expenses)
+
 def cloud_http_error(handler, exc):
     status=getattr(exc,'status',400)
     msg=str(exc) or 'La requête cloud a échoué.'
@@ -129,6 +291,14 @@ def cloud_function(action, session, payload=None):
     data={'action':action}
     if payload: data.update(payload)
     return supabase_request('/functions/v1/admin-users','POST',session,data)
+
+def cloud_auth_event(event, session):
+    """Best-effort authentication event log; business CRUD is logged by DB triggers."""
+    try:
+        return supabase_request('/functions/v1/auth-event','POST',session,{'event':event})
+    except Exception:
+        # Login/logout should not fail just because an optional audit endpoint is not deployed.
+        return None
 
 def make_cloud_sale(d, old=None):
     source=dict(old or {})
@@ -179,6 +349,7 @@ def db(): c=sqlite3.connect(DB_PATH,timeout=30); c.row_factory=sqlite3.Row; retu
 def init_db():
     c=db()
     c.executescript("""CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT,username TEXT UNIQUE NOT NULL,password TEXT NOT NULL,role TEXT NOT NULL,full_name TEXT,created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS expenses(id INTEGER PRIMARY KEY AUTOINCREMENT,amount REAL NOT NULL,category TEXT NOT NULL DEFAULT 'Autre',description TEXT NOT NULL DEFAULT '',paid_to TEXT NOT NULL DEFAULT '',payment_method TEXT NOT NULL DEFAULT '',reference TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',incurred_at TEXT NOT NULL,recorded_by TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS deposits(id INTEGER PRIMARY KEY AUTOINCREMENT,amount REAL NOT NULL,department TEXT,reference TEXT,deposited_by TEXT,notes TEXT,created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS sales(id INTEGER PRIMARY KEY AUTOINCREMENT,device_type TEXT NOT NULL,device_name TEXT,client_name TEXT,mobile TEXT,address TEXT,setup_by TEXT,amount REAL NOT NULL DEFAULT 0,subscription REAL NOT NULL DEFAULT 0,subscription_done INTEGER NOT NULL DEFAULT 0,expenses REAL NOT NULL DEFAULT 0,sold_at TEXT NOT NULL,notes TEXT);
     CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT,username TEXT,action TEXT,details TEXT,created_at TEXT NOT NULL);""")
@@ -372,11 +543,28 @@ class API(BaseHTTPRequestHandler):
             if p=='/api/deposits':
                 rows=cloud_rest('deposits',{'select':'*','order':'id.desc','limit':'200'},session=u) or []
                 return self.send_json({'items':rows})
+            if p=='/api/expenses':
+                rows=cloud_rest('expenses',{'select':'*','order':'incurred_at.desc','limit':'500'},session=u) or []
+                return self.send_json({'items':rows})
+            if p in ('/api/reports','/api/reports/pdf'):
+                query=parse_qs(urlparse(self.path).query)
+                period=query.get('period',['weekly'])[0]
+                selected=query.get('date',[datetime.now().strftime('%Y-%m-%d')])[0]
+                report=cloud_report(period,selected,u)
+                if p.endswith('/pdf'):
+                    return self.send_pdf(report)
+                return self.send_json(report)
             if p=='/api/users':
-                if u.get('role')=='Administrateur':
+                if u.get('role') in ('Administrateur','Superadmin'):
                     result=cloud_function('list',u)
                     return self.send_json({'items':result.get('users',[])})
                 rows=cloud_rest('profiles',{'select':'id,username,role,full_name,created_at','order':'username.asc'},session=u) or []
+                return self.send_json({'items':rows})
+            if p=='/api/audit':
+                if u.get('role') not in ('Administrateur','Superadmin'):
+                    return self.send_json({'error':'La consultation des journaux est réservée à l’administrateur ou au Superadmin.'},403)
+                fields='id,username,action,details,created_at,actor_id,actor_email,actor_role,entity_table,entity_id,operation,before_data,after_data'
+                rows=cloud_rest('audit',{'select':fields,'order':'created_at.desc','limit':'500'},session=u) or []
                 return self.send_json({'items':rows})
             if p=='/api/dashboard':
                 query=parse_qs(urlparse(self.path).query)
@@ -386,11 +574,15 @@ class API(BaseHTTPRequestHandler):
                 dep_rows=cloud_rest('deposits',{'select':'*','and':'(created_at.gte.'+start+',created_at.lt.'+end+')','order':'id.desc','limit':'200'},session=u) or []
                 revenue=sum(num(x.get('total_amount') if x.get('total_amount') is not None else x.get('amount')) for x in sales_rows)
                 subs=sum(num(x.get('subscription')) for x in sales_rows)
-                exp=sum(num(x.get('expenses')) for x in sales_rows)
+                sale_exp=sum(num(x.get('expenses')) for x in sales_rows)
+                expense_rows=cloud_rest('expenses',{'select':'*','and':'(incurred_at.gte.'+start+',incurred_at.lt.'+end+')','order':'id.desc','limit':'200'},session=u) or []
+                company_exp=sum(num(x.get('amount')) for x in expense_rows)
+                exp=sale_exp+company_exp
                 dep_total=sum(num(x.get('amount')) for x in dep_rows)
                 gps=sum(1 for x in sales_rows if str(x.get('device_type','')).upper()=='GPS')
                 star=sum(1 for x in sales_rows if str(x.get('device_type','')).upper()=='STARLINK')
                 return self.send_json({'deposits':dep_total,'revenue':revenue,'subscriptions':subs,'expenses':exp,
+                                       'sale_expenses':sale_exp,'company_expenses':company_exp,
                                        'gps':gps,'starlink':star,'recent':sales_rows[:8],'recent_deposits':dep_rows[:8]})
             return self.send_json({'error':'Introuvable'},404)
         except CloudAPIError as e:
@@ -417,13 +609,14 @@ class API(BaseHTTPRequestHandler):
                 if not rows:
                     return self.send_json({'error':'Votre compte est authentifié mais aucun profil employé ne lui est associé. Contactez l’administrateur.'},403)
                 profile=rows[0]
-                if profile.get('role') not in ('RH','Gestionnaire','Administrateur'):
+                if profile.get('role') not in ('RH','Gestionnaire','Administrateur','Superadmin'):
                     return self.send_json({'error':'Votre rôle d’employé est invalide. Contactez l’administrateur.'},403)
                 local_token=secrets.token_urlsafe(32)
                 cloud_session.update({'id':profile['id'],'username':profile['username'],'role':profile['role'],
                                       'full_name':profile.get('full_name') or profile['username'],
                                       'email':email,'created_at':profile.get('created_at','')})
                 self.sessions[local_token]=cloud_session
+                cloud_auth_event('login',cloud_session)
                 return self.send_json({'token':local_token,'user':cloud_session_user(cloud_session,profile)})
             except CloudAPIError as e:
                 if e.status in (400,401): return self.send_json({'error':'Adresse e-mail ou mot de passe incorrect.'},401)
@@ -431,6 +624,10 @@ class API(BaseHTTPRequestHandler):
 
         u=self.auth()
         if not u: return self.send_json({'error':'Non autorisé'},401)
+        if p=='/api/logout':
+            cloud_auth_event('logout',u)
+            self.sessions.pop(self.headers.get('Authorization','').replace('Bearer ',''),None)
+            return self.send_json({'ok':True})
         try:
             if p=='/api/deposits':
                 record={'amount':num(d.get('amount')),'department':d.get('department') or 'Finance',
@@ -446,6 +643,25 @@ class API(BaseHTTPRequestHandler):
                         'notes':d.get('notes') or '','created_at':iso_local(d.get('created_at'))}
                 cloud_rest('deposits',{'id':'eq.'+m.group(1)},'PATCH',u,record,'return=representation')
                 return self.send_json({'ok':True})
+            if p=='/api/expenses':
+                amount=num(d.get('amount'))
+                if amount < 0: return self.send_json({'error':'Le montant de la dépense ne peut pas être négatif.'},400)
+                record={'amount':amount,'category':str(d.get('category') or 'Autre'),'description':str(d.get('description') or ''),
+                        'paid_to':str(d.get('paid_to') or ''),'payment_method':str(d.get('payment_method') or ''),
+                        'reference':str(d.get('reference') or ''),'notes':str(d.get('notes') or ''),
+                        'incurred_at':iso_local(d.get('incurred_at')),'recorded_by':u.get('full_name') or u.get('username','')}
+                cloud_rest('expenses',method='POST',session=u,payload=record,prefer='return=representation')
+                return self.send_json({'ok':True})
+            m=re.fullmatch(r'/api/expenses/([^/]+)/edit',p)
+            if m:
+                amount=num(d.get('amount'))
+                if amount < 0: return self.send_json({'error':'Le montant de la dépense ne peut pas être négatif.'},400)
+                record={'amount':amount,'category':str(d.get('category') or 'Autre'),'description':str(d.get('description') or ''),
+                        'paid_to':str(d.get('paid_to') or ''),'payment_method':str(d.get('payment_method') or ''),
+                        'reference':str(d.get('reference') or ''),'notes':str(d.get('notes') or ''),
+                        'incurred_at':iso_local(d.get('incurred_at'))}
+                cloud_rest('expenses',{'id':'eq.'+m.group(1)},'PATCH',u,record,'return=representation')
+                return self.send_json({'ok':True})
             if p=='/api/sales':
                 record=make_cloud_sale(d)
                 cloud_rest('sales',method='POST',session=u,payload=record,prefer='return=representation')
@@ -458,7 +674,7 @@ class API(BaseHTTPRequestHandler):
                 cloud_rest('sales',{'id':'eq.'+m.group(1)},'PATCH',u,record,'return=representation')
                 return self.send_json({'ok':True})
             if p=='/api/users':
-                if u.get('role')!='Administrateur': return self.send_json({'error':'Accès réservé à l’administrateur'},403)
+                if u.get('role') not in ('Administrateur','Superadmin'): return self.send_json({'error':'Accès réservé à l’administrateur ou au Superadmin'},403)
                 payload={'email':d.get('email',''),'username':d.get('username',''),
                          'full_name':d.get('full_name',''),'role':d.get('role','RH'),
                          'password':d.get('password','')}
@@ -466,7 +682,7 @@ class API(BaseHTTPRequestHandler):
                 return self.send_json({'ok':True,'result':result})
             m=re.fullmatch(r'/api/users/([^/]+)/edit',p)
             if m:
-                if u.get('role')!='Administrateur': return self.send_json({'error':'Accès réservé à l’administrateur'},403)
+                if u.get('role') not in ('Administrateur','Superadmin'): return self.send_json({'error':'Accès réservé à l’administrateur ou au Superadmin'},403)
                 payload={'id':m.group(1),'username':d.get('username',''),'full_name':d.get('full_name',''),
                          'email':d.get('email',''),'role':d.get('role','RH'),'password':d.get('password','')}
                 result=cloud_function('update',u,payload)
@@ -482,7 +698,7 @@ class API(BaseHTTPRequestHandler):
         try:
             m=re.fullmatch(r'/api/users/([^/]+)',p)
             if m:
-                if u.get('role')!='Administrateur': return self.send_json({'error':'Accès réservé à l’administrateur'},403)
+                if u.get('role') not in ('Administrateur','Superadmin'): return self.send_json({'error':'Accès réservé à l’administrateur ou au Superadmin'},403)
                 result=cloud_function('delete',u,{'id':m.group(1)})
                 return self.send_json({'ok':True,'result':result})
             m=re.fullmatch(r'/api/sales/([^/]+)',p)
@@ -493,9 +709,60 @@ class API(BaseHTTPRequestHandler):
             if m:
                 cloud_rest('deposits',{'id':'eq.'+m.group(1)},'DELETE',u,None,'return=representation')
                 return self.send_json({'ok':True})
+            m=re.fullmatch(r'/api/expenses/([^/]+)',p)
+            if m:
+                cloud_rest('expenses',{'id':'eq.'+m.group(1)},'DELETE',u,None,'return=representation')
+                return self.send_json({'ok':True})
             return self.send_json({'error':'Introuvable'},404)
         except CloudAPIError as e:
             return cloud_http_error(self,e)
+
+    def send_pdf(self, report):
+        """Save the PDF to the Windows Downloads folder and return its exact path.
+
+        A browser-blob download can be silently blocked or handled differently by the
+        embedded pywebview browser. Saving via the local Python process makes the
+        output location deterministic and visible to the user.
+        """
+        try:
+            raw = report_pdf_bytes(report)
+            period = 'mensuel' if report.get('period') == 'monthly' else 'hebdomadaire'
+            start_date = str(report.get('start_date', '') or '').replace('/', '-').replace('\\', '-')
+            end_date = str(report.get('end_date', '') or '').replace('/', '-').replace('\\', '-')
+            stamp = datetime.now().strftime('%H-%M-%S')
+
+            downloads_dir = os.path.join(os.path.expanduser('~'), 'Downloads')
+            if os.name == 'nt':
+                # Respect a redirected Windows Downloads folder (for example OneDrive).
+                try:
+                    import winreg
+                    with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                        r'Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders') as key:
+                        configured, _ = winreg.QueryValueEx(key, '{374DE290-123F-4565-9164-39C4925E467B}')
+                    if configured:
+                        downloads_dir = os.path.expandvars(configured)
+                except (OSError, ImportError):
+                    pass
+
+            os.makedirs(downloads_dir, exist_ok=True)
+            filename = f"rapport_{period}_{start_date}_{end_date}_{stamp}.pdf"
+            saved_path = os.path.abspath(os.path.join(downloads_dir, filename))
+            with open(saved_path, 'wb') as pdf_file:
+                pdf_file.write(raw)
+
+            return self.send_json({
+                'ok': True,
+                'filename': filename,
+                'saved_path': saved_path,
+                'folder': os.path.abspath(downloads_dir),
+                'message': 'Le rapport PDF a été enregistré dans Téléchargements.'
+            })
+        except CloudAPIError as exc:
+            return self.send_json({'error': str(exc)}, getattr(exc, 'status', 500))
+        except Exception as exc:
+            return self.send_json({
+                'error': "Impossible d’enregistrer le PDF dans Téléchargements : " + str(exc)[:240]
+            }, 500)
 
     def log_message(self,*a): pass
     def cors(self): self.send_header('Access-Control-Allow-Origin','*'); self.send_header('Access-Control-Allow-Headers','Content-Type, Authorization'); self.send_header('Access-Control-Allow-Methods','GET,POST,DELETE,OPTIONS')
@@ -525,11 +792,24 @@ class API(BaseHTTPRequestHandler):
                 access=load_lan_access(); return self.send_json({'role':RUNTIME_ROLE,'server':RUNTIME_SERVER or '127.0.0.1','port':RUNTIME_PORT,'hostname':socket.gethostname(),'local_ip':local_ip(),'online':True,'access_enabled':access['enabled'],'max_clients':access['max_clients']})
             if p=='/api/dashboard':
                 date=parse_qs(urlparse(self.path).query).get('date',[datetime.now().strftime('%Y-%m-%d')])[0]
-                dep=c.execute('SELECT COALESCE(SUM(amount),0)v FROM deposits WHERE date(created_at)=?',(date,)).fetchone()['v']; rev=c.execute('SELECT COALESCE(SUM(total_amount),0)v FROM sales WHERE date(sold_at)=?',(date,)).fetchone()['v']; sub=c.execute('SELECT COALESCE(SUM(subscription),0)v FROM sales WHERE date(sold_at)=?',(date,)).fetchone()['v']; exp=c.execute('SELECT COALESCE(SUM(expenses),0)v FROM sales WHERE date(sold_at)=?',(date,)).fetchone()['v']; gps=c.execute("SELECT COUNT(*)v FROM sales WHERE device_type='GPS' AND date(sold_at)=?",(date,)).fetchone()['v']; star=c.execute("SELECT COUNT(*)v FROM sales WHERE device_type='Starlink' AND date(sold_at)=?",(date,)).fetchone()['v']; recent=[dict(x) for x in c.execute('SELECT * FROM sales WHERE date(sold_at)=? ORDER BY id DESC LIMIT 8',(date,))]; rd=[dict(x) for x in c.execute('SELECT * FROM deposits WHERE date(created_at)=? ORDER BY id DESC LIMIT 8',(date,))]; return self.send_json({'deposits':dep,'revenue':rev,'subscriptions':sub,'expenses':exp,'gps':gps,'starlink':star,'recent':recent,'recent_deposits':rd})
+                dep=c.execute('SELECT COALESCE(SUM(amount),0)v FROM deposits WHERE date(created_at)=?',(date,)).fetchone()['v']; rev=c.execute('SELECT COALESCE(SUM(total_amount),0)v FROM sales WHERE date(sold_at)=?',(date,)).fetchone()['v']; sub=c.execute('SELECT COALESCE(SUM(subscription),0)v FROM sales WHERE date(sold_at)=?',(date,)).fetchone()['v']; sale_exp=c.execute('SELECT COALESCE(SUM(expenses),0)v FROM sales WHERE date(sold_at)=?',(date,)).fetchone()['v']; company_exp=c.execute('SELECT COALESCE(SUM(amount),0)v FROM expenses WHERE date(incurred_at)=?',(date,)).fetchone()['v']; exp=sale_exp+company_exp; gps=c.execute("SELECT COUNT(*)v FROM sales WHERE device_type='GPS' AND date(sold_at)=?",(date,)).fetchone()['v']; star=c.execute("SELECT COUNT(*)v FROM sales WHERE device_type='Starlink' AND date(sold_at)=?",(date,)).fetchone()['v']; recent=[dict(x) for x in c.execute('SELECT * FROM sales WHERE date(sold_at)=? ORDER BY id DESC LIMIT 8',(date,))]; rd=[dict(x) for x in c.execute('SELECT * FROM deposits WHERE date(created_at)=? ORDER BY id DESC LIMIT 8',(date,))]; return self.send_json({'deposits':dep,'revenue':rev,'subscriptions':sub,'expenses':exp,'sale_expenses':sale_exp,'company_expenses':company_exp,'gps':gps,'starlink':star,'recent':recent,'recent_deposits':rd})
             if p=='/api/deposits':return self.send_json({'items':[dict(x) for x in c.execute('SELECT * FROM deposits ORDER BY id DESC LIMIT 200')]})
+            if p=='/api/expenses':return self.send_json({'items':[dict(x) for x in c.execute('SELECT * FROM expenses ORDER BY incurred_at DESC LIMIT 500')]})
+            if p in ('/api/reports','/api/reports/pdf'):
+                query=parse_qs(urlparse(self.path).query); period=query.get('period',['weekly'])[0]; selected=query.get('date',[datetime.now().strftime('%Y-%m-%d')])[0]
+                info=report_period(period,selected); sales_rows=[dict(x) for x in c.execute('SELECT * FROM sales WHERE date(sold_at)>=? AND date(sold_at)<=? ORDER BY sold_at',(info['start_date'],info['end_date']))]
+                dep_rows=[dict(x) for x in c.execute('SELECT * FROM deposits WHERE date(created_at)>=? AND date(created_at)<=? ORDER BY created_at',(info['start_date'],info['end_date']))]
+                expense_rows=[dict(x) for x in c.execute('SELECT * FROM expenses WHERE date(incurred_at)>=? AND date(incurred_at)<=? ORDER BY incurred_at',(info['start_date'],info['end_date']))]
+                report=assemble_report(info,sales_rows,dep_rows,expense_rows)
+                if p.endswith('/pdf'):return self.send_pdf(report)
+                return self.send_json(report)
             if p=='/api/sales':return self.send_json({'items':[dict(x) for x in c.execute('SELECT * FROM sales ORDER BY id DESC LIMIT 200')]})
             if p=='/api/users':
                 return self.send_json({'items':[dict(x) for x in c.execute('SELECT id,username,role,full_name,created_at FROM users ORDER BY id')]})
+            if p=='/api/audit':
+                if u.get('role') not in ('Administrateur','Superadmin'):
+                    return self.send_json({'error':'La consultation des journaux est réservée à l’administrateur ou au Superadmin.'},403)
+                return self.send_json({'items':[dict(x) for x in c.execute('SELECT id,username,action,details,created_at FROM audit ORDER BY id DESC LIMIT 500')]})
             return self.send_json({'error':'Introuvable'},404)
         finally:c.close()
     def do_POST(self):
@@ -538,11 +818,23 @@ class API(BaseHTTPRequestHandler):
         if cloud_enabled():
             return self.cloud_post(p,d)
         if p=='/api/login':
-            c=db(); u=c.execute('SELECT * FROM users WHERE username=?',(d.get('username',''),)).fetchone(); c.close()
-            if not u or not verify_password(d.get('password',''),u['password']):return self.send_json({'error':'Nom d’utilisateur ou mot de passe incorrect'},401)
-            tok=secrets.token_urlsafe(32); self.sessions[tok]={'id':u['id'],'username':u['username'],'role':u['role'],'full_name':u['full_name']}; return self.send_json({'token':tok,'user':self.sessions[tok]})
+            c=db(); u=c.execute('SELECT * FROM users WHERE username=?',(d.get('username',''),)).fetchone()
+            if not u or not verify_password(d.get('password',''),u['password']):
+                c.close(); return self.send_json({'error':'Nom d’utilisateur ou mot de passe incorrect'},401)
+            c.execute('INSERT INTO audit(username,action,details,created_at) VALUES(?,?,?,?)',
+                      (u['username'],'Connexion réussie',json.dumps({'event':'login','role':u['role']},ensure_ascii=False),now()))
+            c.commit(); tok=secrets.token_urlsafe(32)
+            self.sessions[tok]={'id':u['id'],'username':u['username'],'role':u['role'],'full_name':u['full_name']}
+            c.close(); return self.send_json({'token':tok,'user':self.sessions[tok]})
         u=self.auth()
         if not u:return self.send_json({'error':'Non autorisé'},401)
+        if p=='/api/logout':
+            c=db()
+            c.execute('INSERT INTO audit(username,action,details,created_at) VALUES(?,?,?,?)',
+                      (u.get('username',''),'Déconnexion',json.dumps({'event':'logout','role':u.get('role','')},ensure_ascii=False),now()))
+            c.commit(); c.close()
+            self.sessions.pop(self.headers.get('Authorization','').replace('Bearer ',''),None)
+            return self.send_json({'ok':True})
         c=db(); cur=c.cursor()
         try:
             if p=='/api/deposits':cur.execute('INSERT INTO deposits(amount,department,reference,deposited_by,notes,created_at)VALUES(?,?,?,?,?,?)',(float(d.get('amount',0)),d.get('department','Finance'),d.get('reference',''),d.get('deposited_by','') or u['full_name'] or u['username'],d.get('notes',''),d.get('created_at') or now()))
@@ -554,6 +846,19 @@ class API(BaseHTTPRequestHandler):
                 cur.execute('UPDATE deposits SET amount=?,department=?,reference=?,deposited_by=?,notes=?,created_at=? WHERE id=?',(
                     float(d.get('amount',target['amount'])),d.get('department',target['department'] or 'Finance'),d.get('reference',target['reference'] or ''),
                     d.get('deposited_by',target['deposited_by'] or ''),d.get('notes',target['notes'] or ''),d.get('created_at',target['created_at']),int(uid)))
+            elif p=='/api/expenses':
+                amount=num(d.get('amount'))
+                if amount<0:return self.send_json({'error':'Le montant de la dépense ne peut pas être négatif.'},400)
+                cur.execute('INSERT INTO expenses(amount,category,description,paid_to,payment_method,reference,notes,incurred_at,recorded_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
+                    (amount,d.get('category') or 'Autre',d.get('description') or '',d.get('paid_to') or '',d.get('payment_method') or '',d.get('reference') or '',d.get('notes') or '',d.get('incurred_at') or now(),u.get('full_name') or u.get('username',''),now()))
+            elif re.fullmatch(r'/api/expenses/([^/]+)/edit',p):
+                uid=re.fullmatch(r'/api/expenses/([^/]+)/edit',p).group(1)
+                target=cur.execute('SELECT * FROM expenses WHERE id=?',(uid,)).fetchone()
+                if not target:return self.send_json({'error':'Dépense introuvable'},404)
+                amount=num(d.get('amount',target['amount']))
+                if amount<0:return self.send_json({'error':'Le montant de la dépense ne peut pas être négatif.'},400)
+                cur.execute('UPDATE expenses SET amount=?,category=?,description=?,paid_to=?,payment_method=?,reference=?,notes=?,incurred_at=? WHERE id=?',
+                    (amount,d.get('category',target['category']),d.get('description',target['description']),d.get('paid_to',target['paid_to']),d.get('payment_method',target['payment_method']),d.get('reference',target['reference']),d.get('notes',target['notes']),d.get('incurred_at',target['incurred_at']),uid))
             elif p=='/api/sales':
                 calc=calculate_sale(d)
                 # Amount is the actual final amount collected, calculated from the commercial breakdown.
@@ -582,14 +887,14 @@ class API(BaseHTTPRequestHandler):
                     calc['sim_cost'],calc['activation_cost'],0,0,calc['subscription_months'],0,
                     calc['billed_subscription_monthly'],calc['total_amount'],int(uid)))
             elif p=='/api/users':
-                if u['role']!='Administrateur':return self.send_json({'error':'Accès réservé à l’administrateur'},403)
+                if u['role'] not in ('Administrateur','Superadmin'):return self.send_json({'error':'Accès réservé à l’administrateur ou au Superadmin'},403)
                 role=str(d.get('role','')).strip()
                 if role not in ('RH','Gestionnaire','Administrateur'):return self.send_json({'error':'Rôle invalide'},400)
                 if not str(d.get('username','')).strip() or not str(d.get('password','')):return self.send_json({'error':'Nom d’utilisateur et mot de passe obligatoires'},400)
                 cur.execute('INSERT INTO users(username,password,role,full_name,created_at)VALUES(?,?,?,?,?)',(d['username'].strip(),hash_password(d['password']),role,d.get('full_name','').strip(),now()))
             elif p.startswith('/api/users/') and p.endswith('/edit'):
-                if u['role']!='Administrateur':
-                    return self.send_json({'error':'Accès réservé à l’administrateur'},403)
+                if u['role'] not in ('Administrateur','Superadmin'):
+                    return self.send_json({'error':'Accès réservé à l’administrateur ou au Superadmin'},403)
                 uid=p.split('/')[-2]
                 if not uid.isdigit(): return self.send_json({'error':'Identifiant utilisateur invalide'},400)
                 target=cur.execute('SELECT * FROM users WHERE id=?',(int(uid),)).fetchone()
@@ -604,7 +909,21 @@ class API(BaseHTTPRequestHandler):
                 else:
                     cur.execute('UPDATE users SET username=?,role=?,full_name=? WHERE id=?',(username,role,full_name,int(uid)))
             else:return self.send_json({'error':'Introuvable'},404)
-            cur.execute('INSERT INTO audit(username,action,details,created_at)VALUES(?,?,?,?)',(u['username'],p,json.dumps(d),now())); c.commit(); return self.send_json({'ok':True})
+            # Never store passwords in the audit log. Record fields/action only.
+            audit_payload=dict(d)
+            password_changed=bool(audit_payload.pop('password', '') or '')
+            if p=='/api/sales': audit_action='Ajout : vente'
+            elif p.startswith('/api/sales/') and p.endswith('/edit'): audit_action='Modification : vente'
+            elif p=='/api/deposits': audit_action='Ajout : dépôt'
+            elif p.startswith('/api/deposits/') and p.endswith('/edit'): audit_action='Modification : dépôt'
+            elif p=='/api/expenses': audit_action='Ajout : dépense'
+            elif p.startswith('/api/expenses/') and p.endswith('/edit'): audit_action='Modification : dépense'
+            elif p=='/api/users': audit_action='Création d’un utilisateur'
+            elif p.startswith('/api/users/') and p.endswith('/edit'): audit_action='Modification d’un utilisateur'
+            else: audit_action=p
+            audit_details={'endpoint':p,'fields':audit_payload}
+            if password_changed: audit_details['password_changed']=True
+            cur.execute('INSERT INTO audit(username,action,details,created_at)VALUES(?,?,?,?)',(u['username'],audit_action,json.dumps(audit_details,ensure_ascii=False),now())); c.commit(); return self.send_json({'ok':True})
         except sqlite3.IntegrityError:return self.send_json({'error':'Ce nom d’utilisateur existe déjà'},400)
         except Exception as e:c.rollback(); return self.send_json({'error':str(e)},400)
         finally:c.close()
@@ -617,18 +936,33 @@ class API(BaseHTTPRequestHandler):
         c=db()
         try:
             if p.startswith('/api/users/') and p.rsplit('/',1)[-1].isdigit():
-                if u['role']!='Administrateur':return self.send_json({'error':'Accès réservé à l’administrateur'},403)
+                if u['role'] not in ('Administrateur','Superadmin'):return self.send_json({'error':'Accès réservé à l’administrateur ou au Superadmin'},403)
                 uid=int(p.rsplit('/',1)[-1])
                 if uid==u['id']:return self.send_json({'error':'Vous ne pouvez pas supprimer votre propre compte'},400)
-                target=c.execute('SELECT id,role FROM users WHERE id=?',(uid,)).fetchone()
+                target=c.execute('SELECT id,username,role FROM users WHERE id=?',(uid,)).fetchone()
                 if not target:return self.send_json({'error':'Utilisateur introuvable'},404)
-                if target['role']=='Administrateur' and c.execute("SELECT COUNT(*) n FROM users WHERE role='Administrateur'").fetchone()['n']<=1:
+                if str(target['username']).lower()=='destrox' or target['role']=='Superadmin':
+                    return self.send_json({'error':'Le compte Superadmin destrox est protégé et ne peut être supprimé par personne.'},403)
+                if u['role']!='Superadmin' and target['role']=='Administrateur' and c.execute("SELECT COUNT(*) n FROM users WHERE role='Administrateur'").fetchone()['n']<=1:
                     return self.send_json({'error':'Impossible de supprimer le dernier administrateur'},400)
+                c.execute('INSERT INTO audit(username,action,details,created_at) VALUES(?,?,?,?)',
+                          (u.get('username',''),'Suppression d’un utilisateur',json.dumps({'table':'users','id':uid,'before':dict(target)},ensure_ascii=False),now()))
                 c.execute('DELETE FROM users WHERE id=?',(uid,))
             elif p.startswith('/api/sales/') and p.rsplit('/',1)[-1].isdigit():
-                c.execute('DELETE FROM sales WHERE id=?',(int(p.rsplit('/',1)[-1]),))
+                uid=int(p.rsplit('/',1)[-1]); target=c.execute('SELECT * FROM sales WHERE id=?',(uid,)).fetchone()
+                if not target:return self.send_json({'error':'Vente introuvable'},404)
+                cur.execute('INSERT INTO audit(username,action,details,created_at) VALUES(?,?,?,?)',(u.get('username',''),'Suppression : vente',json.dumps({'table':'sales','id':uid,'before':dict(target)},ensure_ascii=False),now()))
+                c.execute('DELETE FROM sales WHERE id=?',(uid,))
             elif p.startswith('/api/deposits/') and p.rsplit('/',1)[-1].isdigit():
-                c.execute('DELETE FROM deposits WHERE id=?',(int(p.rsplit('/',1)[-1]),))
+                uid=int(p.rsplit('/',1)[-1]); target=c.execute('SELECT * FROM deposits WHERE id=?',(uid,)).fetchone()
+                if not target:return self.send_json({'error':'Dépôt introuvable'},404)
+                cur.execute('INSERT INTO audit(username,action,details,created_at) VALUES(?,?,?,?)',(u.get('username',''),'Suppression : dépôt',json.dumps({'table':'deposits','id':uid,'before':dict(target)},ensure_ascii=False),now()))
+                c.execute('DELETE FROM deposits WHERE id=?',(uid,))
+            elif p.startswith('/api/expenses/') and p.rsplit('/',1)[-1].isdigit():
+                uid=int(p.rsplit('/',1)[-1]); target=c.execute('SELECT * FROM expenses WHERE id=?',(uid,)).fetchone()
+                if not target:return self.send_json({'error':'Dépense introuvable'},404)
+                cur.execute('INSERT INTO audit(username,action,details,created_at) VALUES(?,?,?,?)',(u.get('username',''),'Suppression : dépense',json.dumps({'table':'expenses','id':uid,'before':dict(target)},ensure_ascii=False),now()))
+                c.execute('DELETE FROM expenses WHERE id=?',(uid,))
             else:return self.send_json({'error':'Introuvable'},404)
             c.commit(); return self.send_json({'ok':True})
         finally:c.close()

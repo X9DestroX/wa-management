@@ -39,3 +39,7 @@ Cloud mode currently connects:
 - Edge Function `admin-users` for administrator account management
 
 **Important:** test on one non-production laptop first. This release does not automatically import the local SQLite DB. Verify sign-in, CRUD, roles, date/time handling, and user management before using it for live transactions. The existing SQLite/LAN database is preserved.
+
+
+## v1.7.3 — Rapports PDF et registre des dépenses
+Avant d’utiliser la v1.7.3 en mode Cloud, appliquez `supabase/migrations/0002_company_expenses.sql` dans le SQL Editor. Cette migration ajoute la table `public.expenses` avec RLS. Le menu Rapports fournit des rapports hebdomadaires et mensuels et un export PDF de la période sélectionnée. Les dépôts sont présentés séparément du chiffre d’affaires; la position opérationnelle est calculée comme chiffre d’affaires moins les dépenses enregistrées.
