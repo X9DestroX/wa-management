@@ -1,3 +1,53 @@
+# W-A Systeme de Gestion v1.7.8 — Refonte visuelle
+
+Cette version modernise uniquement les couleurs et le style de l’interface. Les fonctions existantes, le modèle de données Supabase, l’inventaire, le scanner, l’import Excel/CSV, les rapports, les journaux d’activité et les rôles restent inchangés.
+
+## Mise à jour
+1. Sauvegardez votre projet.
+2. Fermez W-A Systeme de Gestion sur votre PC de développement.
+3. Extrayez ce ZIP et copiez les sources du dossier `wa-management` dans votre dépôt local en conservant le dossier `.git`.
+4. Ne copiez pas les anciens dossiers `build` ou `dist` dans les nouveaux.
+5. Lancez `build_exe.bat` une fois.
+6. Vérifiez le dashboard, les ventes, le catalogue de produits, les rapports PDF et les journaux avant de distribuer le nouveau dossier `dist`.
+
+Aucune migration SQL ni nouvelle configuration cloud n’est nécessaire.
+
+# W-A Systeme de Gestion v1.7.7 — Scan et import Excel/CSV
+
+Le catalogue inclut maintenant le scan de code-barres / QR par caméra et l’import .xlsx/.csv avec aperçu, validation et contrôle des doublons. Voir `IMPORT_EXCEL_SCAN_FR.md`. Aucune nouvelle migration SQL n’est requise si la migration `0006_product_inventory.sql` est déjà appliquée.
+
+# W-A Systeme de Gestion v1.7.6
+
+Version française avec cloud Supabase, GPS/Starlink, rapports PDF, journaux d’activité, Superadmin destrox et catalogue produits/stock.
+
+## Nouveauté v1.7.6
+Le catalogue central des produits contient les champs visibles : **Catégorie**, **Nom du produit**, **Code-barres / QR code**, **Prix de vente**, **Quantité en stock** et **Notes**. Le menu « Produits et stock » permet d’ajouter, modifier, archiver/réactiver un produit et de consulter les mouvements.
+
+Les nouvelles ventes sont liées au catalogue. Le prix provient de la fiche produit, la quantité est validée contre le stock et Supabase met à jour le stock dans la transaction de vente. La modification de la quantité/du produit ajuste le stock; supprimer une vente restitue les unités. Les anciennes ventes restent historiques et ne sont pas liées automatiquement à un produit.
+
+## Installation — lire avant de construire
+1. Sauvegardez votre projet et gardez la version actuellement fonctionnelle.
+2. Dans Supabase **SQL Editor**, exécutez une seule fois `supabase/migrations/0006_product_inventory.sql`. Ne relancez pas les migrations précédentes.
+3. Vérifiez que les tables `products` et `stock_movements` existent, et que `sales` possède `product_id` et `quantity`.
+4. Copiez les sources de ce ZIP dans votre dépôt local existant `wa-management` en conservant `.git`.
+5. Fermez l’application et exécutez `build_exe.bat` une seule fois sur le PC de développement.
+6. Testez les actions de catalogue et les mouvements avant de distribuer le nouveau build aux autres PC.
+
+## Test recommandé
+- Ajoutez `Starlink Mini`, prix de vente de test, stock initial 5.
+- Vérifiez qu’un mouvement `Stock initial` de +5 existe.
+- Enregistrez une vente de 1 unité : le stock doit passer à 4.
+- Modifiez la vente à 2 unités : le stock doit passer à 3.
+- Supprimez la vente test : le stock doit revenir à 5.
+- Essayez de vendre plus que le stock disponible : la base doit refuser la vente.
+
+## Important
+- La migration n’efface aucune vente historique. Les lignes anciennes ont `product_id = NULL` et ne changent pas le stock. Les associer à des produits existants nécessite une réconciliation manuelle si vous voulez démarrer un stock initial exact.
+- Les produits sont archivés lorsqu’on clique sur « Archiver »; ils restent visibles dans l’historique et ne peuvent plus être choisis pour les nouvelles ventes.
+- Chaque employé authentifié peut actuellement ajouter/modifier/archiver des produits, conformément au modèle actuel où seules les opérations de gestion des utilisateurs sont réservées.
+- Le code-barres/QR peut être saisi manuellement pour le moment. L’import Excel et le scan par caméra ne sont pas inclus dans cette première étape.
+- Ne mettez jamais de clé Supabase Secret/service-role dans l’application Windows ou GitHub.
+
 ## Version 1.7.4 — Journaux d’activité
 
 - Nouveau menu **Journaux d’activité**, réservé à l’Administrateur.

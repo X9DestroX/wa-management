@@ -102,6 +102,7 @@ cmd = [
     '--add-data', 'ui.html;.',
     '--collect-all', 'webview',
     '--collect-all', 'reportlab',
+    '--collect-all', 'openpyxl',
     '--hidden-import', 'webview.platforms.winforms',
     '--hidden-import', 'webview.platforms.edgechromium',
 ]

@@ -1,3 +1,29 @@
+# v1.7.8 — Refonte visuelle professionnelle
+
+- Palette claire modernisée : bleu marine, bleu de confiance et accents or discrets.
+- Amélioration des cartes, tableaux, formulaires, boutons, fenêtres modales et navigation.
+- États actifs, survol, focus clavier et styles responsive plus cohérents.
+- Les changements sont limités à la présentation : aucune logique API, base de données, autorisation ou métier n'est modifiée.
+
+# v1.7.7 — Scanner et import Excel/CSV
+
+- Ajout du scan par caméra pour codes-barres et QR (API native + solution de secours).
+- Ajout de l’import .xlsx et .csv avec aperçu, validation, détection des doublons et confirmation.
+- Ajout du modèle CSV en français.
+- Les quantités initiales importées alimentent l’historique de stock.
+
+# Changelog
+
+## v1.7.6 — Catalogue produits et stock
+- Ajout du catalogue central Supabase avec les six champs métier : catégorie, nom du produit, code-barres/QR, prix de vente, quantité en stock et notes.
+- Ajout de l’historique des mouvements : stock initial, ajustement, vente et retour en stock.
+- Les nouvelles ventes exigent la sélection d’un produit du catalogue et sa quantité. Le prix est calculé depuis le prix catalogue.
+- Les ventes réduisent le stock au sein d’une transaction PostgreSQL; les quantités insuffisantes sont refusées.
+- La modification d’une vente ajuste le stock si le produit ou la quantité change; la suppression restitue le stock.
+- Les produits sont archivés, pas physiquement supprimés, afin de préserver l’historique.
+- Ajout du support de catalogue en mode SQLite local pour préserver le fonctionnement hors cloud.
+- Le champ code-barres/QR est saisissable manuellement dans cette version. Import Excel et scan caméra mobile restent une étape suivante.
+
 # Changelog
 
 ## v1.7.5.1 — Correction du nom Superadmin

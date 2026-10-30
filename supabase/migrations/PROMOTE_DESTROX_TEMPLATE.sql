@@ -1,13 +1,13 @@
 -- Run only AFTER creating the desired Auth user in Supabase Dashboard → Authentication → Users.
--- Replace destrox@superadmin.com with the exact email you selected for destrox.
+-- Replace REPLACE_WITH_SUPERADMIN_EMAIL with the exact email you selected for destrox.
 -- This changes the profile only; it does not create or expose the password.
 do $$
 declare
-  target_email text := lower('destrox@superadmin.com');
+  target_email text := lower('REPLACE_WITH_SUPERADMIN_EMAIL');
   target_id uuid;
 begin
-  if target_email = 'destrox@superadmin.com' or target_email not like '%@%' then
-    raise exception 'Replace destrox@superadmin.com with destrox account email before running this SQL.';
+  if target_email = 'replace_with_superadmin_email' or target_email not like '%@%' then
+    raise exception 'Replace REPLACE_WITH_SUPERADMIN_EMAIL with destrox account email before running this SQL.';
   end if;
 
   select id into target_id from auth.users where lower(email) = target_email;

@@ -1,4 +1,4 @@
-import json, os, re, secrets, sqlite3, hashlib, threading, webbrowser, socket, time, shutil, ipaddress, urllib.request, urllib.error, base64
+import json, os, re, secrets, sqlite3, hashlib, threading, webbrowser, socket, time, shutil, ipaddress, urllib.request, urllib.error, base64, csv, io, unicodedata, math
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, urlencode, quote
@@ -229,18 +229,18 @@ def report_pdf_bytes(report):
         if typ=='GPS':
             gps_rows.append([dt,x.get('client_name') or '-',x.get('mobile') or '-',x.get('sim_number') or x.get('device_phone') or '-',x.get('gps_type') or '-',fmt(x.get('amount')),fmt(x.get('subscription')),fmt(total),x.get('address') or '-',x.get('notes') or '-'])
         elif typ=='STARLINK':
-            star_rows.append([dt,fmt(x.get('amount')),x.get('notes') or '-'])
+            star_rows.append([dt,x.get('device_name') or 'Starlink',str(x.get('quantity') or 1),fmt(x.get('amount')),x.get('notes') or '-'])
         else:
-            other_rows.append([dt,x.get('device_type') or '-',fmt(total),x.get('notes') or '-'])
+            other_rows.append([dt,x.get('device_type') or '-',x.get('device_name') or '-',str(x.get('quantity') or 1),fmt(total),x.get('notes') or '-'])
     if gps_rows:
         story.append(Paragraph('Ventes GPS',styles['Heading3']))
         story.append(make_table(['Date et heure','Client','Téléphone','N° SIM','Type GPS','Montant','Abonnement','Total payé','Adresse','Note'],gps_rows,[22*mm,27*mm,20*mm,17*mm,13*mm,18*mm,18*mm,20*mm,36*mm,36*mm]))
     if star_rows:
         story.append(Paragraph('Ventes Starlink',styles['Heading3']))
-        story.append(make_table(['Date et heure','Montant à payer','Note'],star_rows,[45*mm,35*mm,160*mm]))
+        story.append(make_table(['Date et heure','Produit','Quantité','Montant à payer','Note'],star_rows,[35*mm,48*mm,20*mm,35*mm,102*mm]))
     if other_rows:
         story.append(Paragraph('Autres ventes',styles['Heading3']))
-        story.append(make_table(['Date et heure','Type','Total payé','Note'],other_rows,[45*mm,35*mm,35*mm,125*mm]))
+        story.append(make_table(['Date et heure','Catégorie','Produit','Quantité','Total payé','Note'],other_rows,[30*mm,30*mm,52*mm,18*mm,32*mm,78*mm]))
     if not report['sales']: story.append(Paragraph('Aucune vente enregistrée sur cette période.',styles['WAMeta']))
 
     story.append(Paragraph('Dépôts financiers',styles['WASection']))
@@ -310,6 +310,8 @@ def make_cloud_sale(d, old=None):
     return {
         'device_type':typ,
         'device_name':str(source.get('device_name') or ''),
+        'product_id':int(source['product_id']) if str(source.get('product_id','')).strip().isdigit() else None,
+        'quantity':max(1,int(num(source.get('quantity')) or 1)),
         'client_name':str(source.get('client_name') or '') if typ.upper()=='GPS' else '',
         'mobile':str(source.get('mobile') or '') if typ.upper()=='GPS' else '',
         'device_phone':str(source.get('device_phone') or ''),
@@ -340,6 +342,31 @@ def cloud_session_user(session, profile):
             'full_name':profile.get('full_name') or profile['username'],
             'email':profile.get('email') or ''}
 
+def product_payload(data, old=None):
+    old=old or {}
+    category=str(data.get('category',old.get('category','')) or '').strip()
+    product_name=str(data.get('product_name',old.get('product_name','')) or '').strip()
+    barcode_qr=str(data.get('barcode_qr',old.get('barcode_qr','')) or '').strip()
+    notes=str(data.get('notes',old.get('notes','')) or '').strip()
+    selling_price=num(data.get('selling_price',old.get('selling_price',0)))
+    try:
+        stock_quantity=int(data.get('stock_quantity',old.get('stock_quantity',0)) or 0)
+    except (TypeError,ValueError):
+        raise ValueError('La quantité en stock doit être un nombre entier.')
+    is_active=data.get('is_active',old.get('is_active',True))
+    if isinstance(is_active,str): is_active=is_active.strip().lower() not in ('false','0','non','off','')
+    if not category: raise ValueError('La catégorie du produit est obligatoire.')
+    if not product_name: raise ValueError('Le nom du produit est obligatoire.')
+    if selling_price < 0: raise ValueError('Le prix de vente ne peut pas être négatif.')
+    if stock_quantity < 0: raise ValueError('La quantité en stock ne peut pas être négative.')
+    return {'category':category,'product_name':product_name,'barcode_qr':barcode_qr,
+            'selling_price':round(selling_price,2),'stock_quantity':stock_quantity,
+            'notes':notes,'is_active':bool(is_active)}
+
+
+def inventory_actor_username(session):
+    return str((session or {}).get('username') or (session or {}).get('full_name') or 'utilisateur')
+
 def now(): return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 def hash_password(p,salt=None): salt=salt or secrets.token_hex(16); return salt+':'+hashlib.pbkdf2_hmac('sha256',p.encode(),bytes.fromhex(salt),120000).hex()
 def verify_password(p,stored):
@@ -349,6 +376,8 @@ def db(): c=sqlite3.connect(DB_PATH,timeout=30); c.row_factory=sqlite3.Row; retu
 def init_db():
     c=db()
     c.executescript("""CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT,username TEXT UNIQUE NOT NULL,password TEXT NOT NULL,role TEXT NOT NULL,full_name TEXT,created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS products(id INTEGER PRIMARY KEY AUTOINCREMENT,category TEXT NOT NULL,product_name TEXT NOT NULL,barcode_qr TEXT NOT NULL DEFAULT '',selling_price REAL NOT NULL DEFAULT 0,stock_quantity INTEGER NOT NULL DEFAULT 0,notes TEXT NOT NULL DEFAULT '',is_active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS stock_movements(id INTEGER PRIMARY KEY AUTOINCREMENT,product_id INTEGER NOT NULL,movement_type TEXT NOT NULL,quantity_delta INTEGER NOT NULL,reference_table TEXT NOT NULL DEFAULT '',reference_id TEXT NOT NULL DEFAULT '',actor_id INTEGER,actor_username TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS expenses(id INTEGER PRIMARY KEY AUTOINCREMENT,amount REAL NOT NULL,category TEXT NOT NULL DEFAULT 'Autre',description TEXT NOT NULL DEFAULT '',paid_to TEXT NOT NULL DEFAULT '',payment_method TEXT NOT NULL DEFAULT '',reference TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',incurred_at TEXT NOT NULL,recorded_by TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS deposits(id INTEGER PRIMARY KEY AUTOINCREMENT,amount REAL NOT NULL,department TEXT,reference TEXT,deposited_by TEXT,notes TEXT,created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS sales(id INTEGER PRIMARY KEY AUTOINCREMENT,device_type TEXT NOT NULL,device_name TEXT,client_name TEXT,mobile TEXT,address TEXT,setup_by TEXT,amount REAL NOT NULL DEFAULT 0,subscription REAL NOT NULL DEFAULT 0,subscription_done INTEGER NOT NULL DEFAULT 0,expenses REAL NOT NULL DEFAULT 0,sold_at TEXT NOT NULL,notes TEXT);
@@ -368,11 +397,15 @@ def init_db():
         'subscription_months':'INTEGER NOT NULL DEFAULT 1',
         'actual_subscription_monthly':'REAL NOT NULL DEFAULT 2000',
         'billed_subscription_monthly':'REAL NOT NULL DEFAULT 3000',
-        'total_amount':'REAL NOT NULL DEFAULT 0'
+        'total_amount':'REAL NOT NULL DEFAULT 0',
+        'product_id':'INTEGER',
+        'quantity':'INTEGER NOT NULL DEFAULT 1'
     }
     for name,definition in migrations.items():
         if name not in cols:
             c.execute(f'ALTER TABLE sales ADD COLUMN {name} {definition}')
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS products_barcode_qr_unique ON products(lower(trim(barcode_qr))) WHERE trim(coalesce(barcode_qr,'')) <> ''")
+    c.execute('CREATE INDEX IF NOT EXISTS stock_movements_product_created_idx ON stock_movements(product_id, created_at DESC)')
     # Backfill total_amount for existing records without changing their base amount.
     c.execute("UPDATE sales SET total_amount=CASE WHEN UPPER(device_type)='GPS' THEN amount + COALESCE(sim_cost,3000) + COALESCE(subscription,0) ELSE amount END WHERE total_amount=0")
     if c.execute('SELECT COUNT(*) n FROM users').fetchone()['n']==0:
@@ -398,10 +431,11 @@ def calculate_sale(d):
     """
     typ=str(d.get('device_type','GPS')).strip() or 'GPS'
     months=max(0, int(num(d.get('subscription_months')) or 0))
+    quantity=max(1,int(num(d.get('quantity')) or 1))
     base=num(d.get('amount'))
-    sim_activation=3000.0 if typ.upper()=='GPS' else num(d.get('sim_cost'))
+    sim_activation=3000.0*quantity if typ.upper()=='GPS' else num(d.get('sim_cost'))
     billed_monthly=3000.0 if typ.upper()=='GPS' else num(d.get('billed_subscription_monthly'))
-    subscription=billed_monthly * months if typ.upper()=='GPS' else num(d.get('subscription'))
+    subscription=billed_monthly * months * quantity if typ.upper()=='GPS' else num(d.get('subscription'))
     total_amount=base + sim_activation + subscription if typ.upper()=='GPS' else base
     return {'device_price':0.0,'setup_price':0.0,'sim_cost':sim_activation,
             'activation_cost':sim_activation,'subscription':subscription,
@@ -525,8 +559,247 @@ def client_ip_allowed(ip):
     if ip in ('127.0.0.1','::1','localhost'): return True
     return ip in access['allowed_ips']
 
+# Product CSV/XLSX import helpers (v1.7.7)
+def _import_header_key(value):
+    raw=unicodedata.normalize('NFKD',str(value or ''))
+    raw=''.join(ch for ch in raw if not unicodedata.combining(ch)).lower()
+    return ' '.join(re.findall(r'[a-z0-9]+',raw))
+
+_IMPORT_HEADER_ALIASES={}
+for _field,_aliases in {
+    'category':['category','categorie','catégorie','categorie produit'],
+    'product_name':['product name','product_name','nom du produit','nom produit','produit'],
+    'barcode_qr':['barcode qr','barcode_qr','code-barres / qr code','code barres qr code','code barre qr','code barres','code barre','barcode','qr code','ean','gtin'],
+    'selling_price':['selling price','selling_price','prix de vente','prix vente','prix','prix fcfa'],
+    'stock_quantity':['stock quantity','stock_quantity','quantite en stock','quantité en stock','quantite stock','stock','quantity','qty'],
+    'notes':['notes','note','remarques','observation'],
+}.items():
+    for _alias in _aliases:
+        _IMPORT_HEADER_ALIASES[_import_header_key(_alias)]=_field
+
+
+def _import_number(value, field_label):
+    if value is None or (isinstance(value,str) and not value.strip()):
+        raise ValueError(f'{field_label} est obligatoire.')
+    if isinstance(value,bool):
+        raise ValueError(f'{field_label} doit être un nombre.')
+    if isinstance(value,(int,float)):
+        number=float(value)
+    else:
+        raw=str(value).strip().replace('\u00a0','').replace('\u202f','').replace(' ','')
+        raw=re.sub(r'(?i)(fcfa|xaf|cfa)', '', raw)
+        raw=raw.replace("'",'')
+        if not raw:
+            raise ValueError(f'{field_label} est obligatoire.')
+        if ',' in raw and '.' in raw:
+            if raw.rfind(',')>raw.rfind('.'):
+                raw=raw.replace('.','').replace(',','.')
+            else:
+                raw=raw.replace(',','')
+        elif ',' in raw:
+            parts=raw.split(',')
+            if len(parts)>2:
+                raw=''.join(parts)
+            elif len(parts)==2 and len(parts[-1])==3 and parts[-1].isdigit():
+                raw=''.join(parts)
+            else:
+                raw=raw.replace(',','.')
+        elif raw.count('.')>1:
+            parts=raw.split('.')
+            if all(x.isdigit() for x in parts) and len(parts[-1])==3:
+                raw=''.join(parts)
+            else:
+                raise ValueError(f'{field_label} n’est pas un nombre valide.')
+        elif '.' in raw and raw.rsplit('.',1)[-1].isdigit() and len(raw.rsplit('.',1)[-1])==3:
+            before,after=raw.rsplit('.',1)
+            if before.isdigit(): raw=before+after
+        try:
+            number=float(raw)
+        except Exception:
+            raise ValueError(f'{field_label} n’est pas un nombre valide.')
+    if not math.isfinite(number):
+        raise ValueError(f'{field_label} doit être un nombre fini.')
+    return number
+
+
+def _normalize_import_row(source, row_number):
+    errors=[]
+    category=str(source.get('category') or '').strip()
+    product_name=str(source.get('product_name') or '').strip()
+    barcode=str(source.get('barcode_qr') or '').strip()
+    notes=str(source.get('notes') or '').strip()
+    try:
+        price=_import_number(source.get('selling_price'), 'Prix de vente')
+        if price<0: errors.append('Le prix de vente ne peut pas être négatif.')
+    except ValueError as exc:
+        price=0.0; errors.append(str(exc))
+    try:
+        q=_import_number(source.get('stock_quantity'), 'Quantité en stock')
+        if q<0: errors.append('La quantité ne peut pas être négative.')
+        if not q.is_integer(): errors.append('La quantité en stock doit être un entier.')
+        quantity=int(q) if q>=0 and q.is_integer() else 0
+    except ValueError as exc:
+        quantity=0; errors.append(str(exc))
+    if not category: errors.append('La catégorie est obligatoire.')
+    if not product_name: errors.append('Le nom du produit est obligatoire.')
+    return {'row_number':int(row_number),'category':category,'product_name':product_name,
+            'barcode_qr':barcode,'selling_price':round(price,2),'stock_quantity':quantity,
+            'notes':notes,'errors':errors,'valid':not errors}
+
+
+def parse_product_import_file(filename, encoded_content):
+    filename=str(filename or 'produits.csv')
+    ext=os.path.splitext(filename.lower())[1]
+    if ext not in ('.csv','.xlsx'):
+        raise ValueError('Format non pris en charge. Utilisez un fichier .xlsx ou .csv (pas .xls).')
+    if not isinstance(encoded_content,str) or not encoded_content:
+        raise ValueError('Le fichier importé est vide ou illisible.')
+    if len(encoded_content)>11_200_000:
+        raise ValueError('Le fichier dépasse 8 Mo. Divisez le catalogue en plusieurs fichiers.')
+    try:
+        raw=base64.b64decode(encoded_content,validate=True)
+    except Exception:
+        raise ValueError('Le contenu du fichier est invalide.')
+    if len(raw)>8*1024*1024:
+        raise ValueError('Le fichier dépasse 8 Mo. Divisez le catalogue en plusieurs fichiers.')
+    if ext=='.xlsx':
+        try:
+            from openpyxl import load_workbook
+            workbook=load_workbook(io.BytesIO(raw),read_only=True,data_only=True)
+            worksheet=workbook.active
+            matrix=[]
+            for i,row in enumerate(worksheet.iter_rows(values_only=True),start=1):
+                matrix.append(list(row))
+                if i>1002:
+                    workbook.close()
+                    raise ValueError('Le fichier contient plus de 1 000 lignes de produits. Divisez-le en plusieurs fichiers.')
+            workbook.close()
+        except ImportError:
+            raise ValueError('Import Excel indisponible. Relancez build_exe.bat avec les dépendances de la version 1.7.7.')
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError('Impossible de lire ce fichier Excel. Enregistrez-le au format .xlsx et réessayez.') from exc
+    else:
+        try:
+            text=raw.decode('utf-8-sig')
+        except UnicodeDecodeError:
+            try: text=raw.decode('cp1252')
+            except Exception: raise ValueError('Le CSV doit être enregistré en UTF-8 ou en Windows-1252.')
+        sample='\n'.join(text.splitlines()[:10])
+        try: dialect=csv.Sniffer().sniff(sample,delimiters=',;\t')
+        except Exception:
+            class _Dialect(csv.excel): delimiter=','
+            dialect=_Dialect
+        matrix=list(csv.reader(io.StringIO(text),dialect))
+    if not matrix or not any(str(v or '').strip() for v in matrix[0]):
+        raise ValueError('La première ligne doit contenir les en-têtes des colonnes.')
+    headers={}
+    for idx,value in enumerate(matrix[0]):
+        key=_IMPORT_HEADER_ALIASES.get(_import_header_key(value))
+        if key and key not in headers: headers[key]=idx
+    missing=[label for key,label in [('category','Catégorie'),('product_name','Nom du produit'),('selling_price','Prix de vente'),('stock_quantity','Quantité en stock')] if key not in headers]
+    if missing:
+        raise ValueError('Colonnes obligatoires introuvables : '+', '.join(missing)+'. Utilisez le modèle fourni dans l’application.')
+    rows=[]
+    for line_no,values in enumerate(matrix[1:],start=2):
+        if not any(str(v or '').strip() for v in values): continue
+        source={}
+        for field,idx in headers.items():
+            source[field]=values[idx] if idx<len(values) else ''
+        rows.append(_normalize_import_row(source,line_no))
+        if len(rows)>1000:
+            raise ValueError('Le fichier contient plus de 1 000 lignes de produits. Divisez-le en plusieurs fichiers.')
+    if not rows:
+        raise ValueError('Aucun produit trouvé après la ligne des en-têtes.')
+    return rows
+
+
+def mark_import_duplicates(rows, existing_products):
+    rows=[dict(r,errors=list(r.get('errors') or [])) for r in rows]
+    existing_codes={}
+    for product in existing_products or []:
+        code=str(product.get('barcode_qr') or '').strip().casefold()
+        if code: existing_codes[code]=product
+    seen={}
+    for row in rows:
+        code=str(row.get('barcode_qr') or '').strip().casefold()
+        if code:
+            if code in existing_codes:
+                p=existing_codes[code]
+                row['errors'].append(f"Code déjà utilisé par « {p.get('product_name') or 'un produit existant'} ».")
+            elif code in seen:
+                row['errors'].append(f"Code en doublon dans le fichier (ligne {seen[code]}).")
+            else:
+                seen[code]=row.get('row_number','?')
+        row['valid']=not row['errors']
+    return rows
+
+
+def normalize_import_submission(items):
+    rows=[]
+    if not isinstance(items,list): raise ValueError('Liste de produits invalide.')
+    if len(items)>1000: raise ValueError('Import limité à 1 000 produits par fichier.')
+    for i,item in enumerate(items,start=1):
+        if not isinstance(item,dict): item={}
+        rowno=item.get('row_number',i+1)
+        source={key:item.get(key,'') for key in ('category','product_name','barcode_qr','selling_price','stock_quantity','notes')}
+        try: rowno=int(rowno)
+        except Exception: rowno=i+1
+        rows.append(_normalize_import_row(source,rowno))
+    return rows
+
+
+def existing_barcode_label(existing_products):
+    return {str(p.get('barcode_qr') or '').strip().casefold():p for p in (existing_products or []) if str(p.get('barcode_qr') or '').strip()}
+
+
 class API(BaseHTTPRequestHandler):
     sessions={}
+
+    def products_for_import(self, session=None, connection=None):
+        if cloud_enabled():
+            all_rows=[]
+            for offset in range(0,10000,1000):
+                batch=cloud_rest('products',{'select':'id,category,product_name,barcode_qr','order':'id.asc','limit':'1000','offset':str(offset)},session=session) or []
+                all_rows.extend(batch)
+                if len(batch)<1000: break
+            return all_rows
+        if connection is None:
+            connection=db()
+            close_after=True
+        else:
+            close_after=False
+        try:
+            return [dict(r) for r in connection.execute('SELECT id,category,product_name,barcode_qr FROM products')]
+        finally:
+            if close_after: connection.close()
+
+    def import_preview(self, d, session=None, connection=None):
+        rows=parse_product_import_file(d.get('filename',''),d.get('file_base64',''))
+        existing=self.products_for_import(session=session,connection=connection)
+        rows=mark_import_duplicates(rows,existing)
+        valid=sum(1 for r in rows if r['valid'])
+        return {'items':rows,'summary':{'total':len(rows),'valid':valid,'skipped':len(rows)-valid}}
+
+    def import_confirm_cloud(self,d,session):
+        submitted=normalize_import_submission(d.get('items',[]))
+        existing=self.products_for_import(session=session)
+        rows=mark_import_duplicates(submitted,existing)
+        imported=0; skipped=0; errors=[]
+        for row in rows:
+            if not row['valid']:
+                skipped+=1; errors.append({'row_number':row['row_number'],'errors':row['errors']}); continue
+            try:
+                record=product_payload(row)
+                cloud_rest('products',method='POST',session=session,payload=record,prefer='return=representation')
+                imported+=1
+                if row.get('barcode_qr'):
+                    existing.append({'barcode_qr':row['barcode_qr'],'product_name':row['product_name']})
+            except (CloudAPIError,ValueError) as exc:
+                skipped+=1
+                errors.append({'row_number':row['row_number'],'errors':[str(exc)[:240]]})
+        return {'ok':True,'imported':imported,'skipped':skipped,'errors':errors}
 
     def cloud_get(self,p):
         if p=='/api/health':
@@ -537,6 +810,18 @@ class API(BaseHTTPRequestHandler):
             if p=='/api/network':
                 return self.send_json({'role':'cloud','server':'Supabase','port':443,'hostname':socket.gethostname(),
                                        'local_ip':local_ip(),'online':True,'access_enabled':True,'max_clients':0})
+            if p=='/api/products':
+                rows=cloud_rest('products',{'select':'*','order':'category.asc,product_name.asc','limit':'1000'},session=u) or []
+                return self.send_json({'items':rows})
+            if p=='/api/stock-movements':
+                rows=cloud_rest('stock_movements',{'select':'*','order':'created_at.desc','limit':'300'},session=u) or []
+                products=cloud_rest('products',{'select':'id,category,product_name','limit':'1000'},session=u) or []
+                by_id={str(x.get('id')):x for x in products}
+                for row in rows:
+                    product=by_id.get(str(row.get('product_id')),{})
+                    row['product_name']=product.get('product_name','Produit archivé')
+                    row['category']=product.get('category','')
+                return self.send_json({'items':rows})
             if p=='/api/sales':
                 rows=cloud_rest('sales',{'select':'*','order':'id.desc','limit':'200'},session=u) or []
                 return self.send_json({'items':rows})
@@ -629,6 +914,25 @@ class API(BaseHTTPRequestHandler):
             self.sessions.pop(self.headers.get('Authorization','').replace('Bearer ',''),None)
             return self.send_json({'ok':True})
         try:
+            if p=='/api/products/import-preview':
+                preview=self.import_preview(d,session=u)
+                return self.send_json(preview)
+            if p=='/api/products/import-confirm':
+                result=self.import_confirm_cloud(d,u)
+                return self.send_json(result)
+            if p=='/api/products':
+                record=product_payload(d)
+                created=cloud_rest('products',method='POST',session=u,payload=record,prefer='return=representation') or []
+                item=created[0] if isinstance(created,list) and created else (created if isinstance(created,dict) else {})
+                return self.send_json({'ok':True,'item':item})
+            m=re.fullmatch(r'/api/products/([^/]+)/edit',p)
+            if m:
+                old_rows=cloud_rest('products',{'select':'*','id':'eq.'+m.group(1),'limit':'1'},session=u) or []
+                if not old_rows: return self.send_json({'error':'Produit introuvable.'},404)
+                record=product_payload(d,old_rows[0])
+                updated=cloud_rest('products',{'id':'eq.'+m.group(1)},'PATCH',u,record,'return=representation') or []
+                item=updated[0] if isinstance(updated,list) and updated else {}
+                return self.send_json({'ok':True,'item':item})
             if p=='/api/deposits':
                 record={'amount':num(d.get('amount')),'department':d.get('department') or 'Finance',
                         'reference':d.get('reference') or '',
@@ -663,16 +967,50 @@ class API(BaseHTTPRequestHandler):
                 cloud_rest('expenses',{'id':'eq.'+m.group(1)},'PATCH',u,record,'return=representation')
                 return self.send_json({'ok':True})
             if p=='/api/sales':
+                product_id=str(d.get('product_id') or '').strip()
+                if not product_id.isdigit():
+                    return self.send_json({'error':'Sélectionnez un produit du catalogue avant d’enregistrer la vente.'},400)
+                qty=max(1,int(num(d.get('quantity')) or 1))
+                products=cloud_rest('products',{'select':'id,category,product_name,selling_price,stock_quantity,is_active','id':'eq.'+product_id,'limit':'1'},session=u) or []
+                if not products or not products[0].get('is_active',True): return self.send_json({'error':'Le produit sélectionné est introuvable ou archivé.'},404)
+                product=products[0]
+                if int(product.get('stock_quantity') or 0)<qty:
+                    return self.send_json({'error':f"Stock insuffisant : {product.get('stock_quantity',0)} unité(s) disponible(s)."},409)
+                d['product_id']=int(product['id']); d['quantity']=qty
+                d['device_type']=product['category']; d['device_name']=product['product_name']
+                d['amount']=num(product['selling_price'])*qty
                 record=make_cloud_sale(d)
-                cloud_rest('sales',method='POST',session=u,payload=record,prefer='return=representation')
-                return self.send_json({'ok':True})
+                created=cloud_rest('sales',method='POST',session=u,payload=record,prefer='return=representation')
+                return self.send_json({'ok':True,'item':created[0] if isinstance(created,list) and created else None})
             m=re.fullmatch(r'/api/sales/([^/]+)/edit',p)
             if m:
                 old_rows=cloud_rest('sales',{'select':'*','id':'eq.'+m.group(1),'limit':'1'},session=u) or []
                 if not old_rows: return self.send_json({'error':'Vente introuvable.'},404)
-                record=make_cloud_sale(d,old_rows[0])
-                cloud_rest('sales',{'id':'eq.'+m.group(1)},'PATCH',u,record,'return=representation')
-                return self.send_json({'ok':True})
+                old_sale=old_rows[0]
+                if 'product_id' in d and str(d.get('product_id') or '').strip():
+                    product_id=str(d.get('product_id')).strip()
+                    if not product_id.isdigit(): return self.send_json({'error':'Produit invalide.'},400)
+                    qty=max(1,int(num(d.get('quantity')) or 1))
+                    products=cloud_rest('products',{'select':'id,category,product_name,selling_price,stock_quantity,is_active','id':'eq.'+product_id,'limit':'1'},session=u) or []
+                    if not products: return self.send_json({'error':'Le produit sélectionné est introuvable.'},404)
+                    product=products[0]
+                    same_product=str(old_sale.get('product_id') or '')==product_id
+                    same_quantity=int(old_sale.get('quantity') or 1)==qty
+                    if not product.get('is_active',True) and not (same_product and same_quantity):
+                        return self.send_json({'error':'Ce produit est archivé et ne peut pas être utilisé pour modifier le produit ou la quantité de cette vente.'},409)
+                    # Keep the original transaction price when only notes/date are edited; a later catalogue price change must not rewrite history.
+                    if not (same_product and same_quantity):
+                        available=int(product.get('stock_quantity') or 0)
+                        if same_product: available += int(old_sale.get('quantity') or 1)
+                        if available < qty: return self.send_json({'error':f'Stock insuffisant : {available} unité(s) disponible(s) pour cette modification.'},409)
+                        d['amount']=num(product['selling_price'])*qty
+                    d['product_id']=int(product['id']); d['quantity']=qty
+                    d['device_type']=product['category']; d['device_name']=product['product_name']
+                elif 'product_id' in d:
+                    d['product_id']=None; d['quantity']=max(1,int(num(d.get('quantity')) or 1))
+                record=make_cloud_sale(d,old_sale)
+                updated=cloud_rest('sales',{'id':'eq.'+m.group(1)},'PATCH',u,record,'return=representation')
+                return self.send_json({'ok':True,'item':updated[0] if isinstance(updated,list) and updated else None})
             if p=='/api/users':
                 if u.get('role') not in ('Administrateur','Superadmin'): return self.send_json({'error':'Accès réservé à l’administrateur ou au Superadmin'},403)
                 payload={'email':d.get('email',''),'username':d.get('username',''),
@@ -696,6 +1034,11 @@ class API(BaseHTTPRequestHandler):
     def cloud_delete(self,p,u):
         if not u: return self.send_json({'error':'Non autorisé'},401)
         try:
+            m=re.fullmatch(r'/api/products/([^/]+)',p)
+            if m:
+                updated=cloud_rest('products',{'id':'eq.'+m.group(1)},'PATCH',u,{'is_active':False},'return=representation') or []
+                if not updated: return self.send_json({'error':'Produit introuvable.'},404)
+                return self.send_json({'ok':True,'archived':True})
             m=re.fullmatch(r'/api/users/([^/]+)',p)
             if m:
                 if u.get('role') not in ('Administrateur','Superadmin'): return self.send_json({'error':'Accès réservé à l’administrateur ou au Superadmin'},403)
@@ -793,6 +1136,10 @@ class API(BaseHTTPRequestHandler):
             if p=='/api/dashboard':
                 date=parse_qs(urlparse(self.path).query).get('date',[datetime.now().strftime('%Y-%m-%d')])[0]
                 dep=c.execute('SELECT COALESCE(SUM(amount),0)v FROM deposits WHERE date(created_at)=?',(date,)).fetchone()['v']; rev=c.execute('SELECT COALESCE(SUM(total_amount),0)v FROM sales WHERE date(sold_at)=?',(date,)).fetchone()['v']; sub=c.execute('SELECT COALESCE(SUM(subscription),0)v FROM sales WHERE date(sold_at)=?',(date,)).fetchone()['v']; sale_exp=c.execute('SELECT COALESCE(SUM(expenses),0)v FROM sales WHERE date(sold_at)=?',(date,)).fetchone()['v']; company_exp=c.execute('SELECT COALESCE(SUM(amount),0)v FROM expenses WHERE date(incurred_at)=?',(date,)).fetchone()['v']; exp=sale_exp+company_exp; gps=c.execute("SELECT COUNT(*)v FROM sales WHERE device_type='GPS' AND date(sold_at)=?",(date,)).fetchone()['v']; star=c.execute("SELECT COUNT(*)v FROM sales WHERE device_type='Starlink' AND date(sold_at)=?",(date,)).fetchone()['v']; recent=[dict(x) for x in c.execute('SELECT * FROM sales WHERE date(sold_at)=? ORDER BY id DESC LIMIT 8',(date,))]; rd=[dict(x) for x in c.execute('SELECT * FROM deposits WHERE date(created_at)=? ORDER BY id DESC LIMIT 8',(date,))]; return self.send_json({'deposits':dep,'revenue':rev,'subscriptions':sub,'expenses':exp,'sale_expenses':sale_exp,'company_expenses':company_exp,'gps':gps,'starlink':star,'recent':recent,'recent_deposits':rd})
+            if p=='/api/products':return self.send_json({'items':[dict(x) for x in c.execute('SELECT * FROM products ORDER BY category,product_name')]})
+            if p=='/api/stock-movements':
+                rows=[dict(x) for x in c.execute('SELECT m.*,p.product_name,p.category FROM stock_movements m LEFT JOIN products p ON p.id=m.product_id ORDER BY m.created_at DESC,m.id DESC LIMIT 300')]
+                return self.send_json({'items':rows})
             if p=='/api/deposits':return self.send_json({'items':[dict(x) for x in c.execute('SELECT * FROM deposits ORDER BY id DESC LIMIT 200')]})
             if p=='/api/expenses':return self.send_json({'items':[dict(x) for x in c.execute('SELECT * FROM expenses ORDER BY incurred_at DESC LIMIT 500')]})
             if p in ('/api/reports','/api/reports/pdf'):
@@ -837,7 +1184,53 @@ class API(BaseHTTPRequestHandler):
             return self.send_json({'ok':True})
         c=db(); cur=c.cursor()
         try:
-            if p=='/api/deposits':cur.execute('INSERT INTO deposits(amount,department,reference,deposited_by,notes,created_at)VALUES(?,?,?,?,?,?)',(float(d.get('amount',0)),d.get('department','Finance'),d.get('reference',''),d.get('deposited_by','') or u['full_name'] or u['username'],d.get('notes',''),d.get('created_at') or now()))
+            if p=='/api/products/import-preview':
+                preview=self.import_preview(d,connection=c)
+                return self.send_json(preview)
+            if p=='/api/products/import-confirm':
+                submitted=normalize_import_submission(d.get('items',[]))
+                existing=self.products_for_import(connection=c)
+                rows=mark_import_duplicates(submitted,existing)
+                imported=0; skipped=0; errors=[]; stamp=now()
+                for row in rows:
+                    if not row['valid']:
+                        skipped+=1; errors.append({'row_number':row['row_number'],'errors':row['errors']}); continue
+                    try:
+                        rec=product_payload(row)
+                        cur.execute('INSERT INTO products(category,product_name,barcode_qr,selling_price,stock_quantity,notes,is_active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)',
+                            (rec['category'],rec['product_name'],rec['barcode_qr'],rec['selling_price'],rec['stock_quantity'],rec['notes'],1,stamp,stamp))
+                        pid=cur.lastrowid
+                        if rec['stock_quantity']:
+                            cur.execute('INSERT INTO stock_movements(product_id,movement_type,quantity_delta,actor_id,actor_username,notes,created_at) VALUES(?,?,?,?,?,?,?)',
+                                (pid,'stock_initial',rec['stock_quantity'],u.get('id'),u.get('username',''),'Stock initial importé par fichier',stamp))
+                        imported+=1
+                        if rec['barcode_qr']:
+                            existing.append({'barcode_qr':rec['barcode_qr'],'product_name':rec['product_name']})
+                    except (ValueError,sqlite3.IntegrityError) as exc:
+                        skipped+=1; errors.append({'row_number':row['row_number'],'errors':[str(exc)[:240]]})
+                c.commit()
+                return self.send_json({'ok':True,'imported':imported,'skipped':skipped,'errors':errors})
+            if p=='/api/products':
+                rec=product_payload(d)
+                stamp=now()
+                cur.execute('INSERT INTO products(category,product_name,barcode_qr,selling_price,stock_quantity,notes,is_active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)',
+                    (rec['category'],rec['product_name'],rec['barcode_qr'],rec['selling_price'],rec['stock_quantity'],rec['notes'],1 if rec['is_active'] else 0,stamp,stamp))
+                pid=cur.lastrowid
+                if rec['stock_quantity']:
+                    cur.execute('INSERT INTO stock_movements(product_id,movement_type,quantity_delta,actor_id,actor_username,notes,created_at) VALUES(?,?,?,?,?,?,?)',
+                        (pid,'stock_initial',rec['stock_quantity'],u.get('id'),u.get('username',''),'Stock initial à la création du produit',stamp))
+            elif re.fullmatch(r'/api/products/([^/]+)/edit',p):
+                uid=re.fullmatch(r'/api/products/([^/]+)/edit',p).group(1)
+                target=cur.execute('SELECT * FROM products WHERE id=?',(uid,)).fetchone()
+                if not target:return self.send_json({'error':'Produit introuvable.'},404)
+                rec=product_payload(d,dict(target)); old_qty=int(target['stock_quantity'])
+                cur.execute('UPDATE products SET category=?,product_name=?,barcode_qr=?,selling_price=?,stock_quantity=?,notes=?,is_active=?,updated_at=? WHERE id=?',
+                    (rec['category'],rec['product_name'],rec['barcode_qr'],rec['selling_price'],rec['stock_quantity'],rec['notes'],1 if rec['is_active'] else 0,now(),uid))
+                delta=rec['stock_quantity']-old_qty
+                if delta:
+                    cur.execute('INSERT INTO stock_movements(product_id,movement_type,quantity_delta,actor_id,actor_username,notes,created_at) VALUES(?,?,?,?,?,?,?)',
+                        (uid,'ajustement',delta,u.get('id'),u.get('username',''),'Ajustement manuel du stock',now()))
+            elif p=='/api/deposits':cur.execute('INSERT INTO deposits(amount,department,reference,deposited_by,notes,created_at)VALUES(?,?,?,?,?,?)',(float(d.get('amount',0)),d.get('department','Finance'),d.get('reference',''),d.get('deposited_by','') or u['full_name'] or u['username'],d.get('notes',''),d.get('created_at') or now()))
             elif p.startswith('/api/deposits/') and p.endswith('/edit'):
                 uid=p.split('/')[-2]
                 if not uid.isdigit(): return self.send_json({'error':'Identifiant du dépôt invalide'},400)
@@ -860,32 +1253,62 @@ class API(BaseHTTPRequestHandler):
                 cur.execute('UPDATE expenses SET amount=?,category=?,description=?,paid_to=?,payment_method=?,reference=?,notes=?,incurred_at=? WHERE id=?',
                     (amount,d.get('category',target['category']),d.get('description',target['description']),d.get('paid_to',target['paid_to']),d.get('payment_method',target['payment_method']),d.get('reference',target['reference']),d.get('notes',target['notes']),d.get('incurred_at',target['incurred_at']),uid))
             elif p=='/api/sales':
-                calc=calculate_sale(d)
-                # Amount is the actual final amount collected, calculated from the commercial breakdown.
-                amount=calc['total_amount']
-                cur.execute('''INSERT INTO sales(device_type,device_name,client_name,mobile,device_phone,sim_number,gps_type,address,setup_by,amount,subscription,subscription_done,expenses,sold_at,notes,device_price,setup_price,sim_cost,activation_cost,benefit,next_month_activation,subscription_months,actual_subscription_monthly,billed_subscription_monthly,total_amount)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                product_id=str(d.get('product_id') or '').strip()
+                if not product_id.isdigit(): return self.send_json({'error':'Sélectionnez un produit du catalogue avant d’enregistrer la vente.'},400)
+                qty=max(1,int(num(d.get('quantity')) or 1))
+                product=cur.execute('SELECT * FROM products WHERE id=? AND is_active=1',(int(product_id),)).fetchone()
+                if not product:return self.send_json({'error':'Le produit sélectionné est introuvable ou archivé.'},404)
+                if int(product['stock_quantity'])<qty:return self.send_json({'error':f"Stock insuffisant : {product['stock_quantity']} unité(s) disponible(s)."},409)
+                d['quantity']=qty; d['device_type']=product['category']; d['device_name']=product['product_name']
+                d['amount']=num(product['selling_price'])*qty
+                calc=calculate_sale(d); amount=calc['total_amount']
+                cur.execute('''INSERT INTO sales(device_type,device_name,client_name,mobile,device_phone,sim_number,gps_type,address,setup_by,amount,subscription,subscription_done,expenses,sold_at,notes,device_price,setup_price,sim_cost,activation_cost,benefit,next_month_activation,subscription_months,actual_subscription_monthly,billed_subscription_monthly,total_amount,product_id,quantity)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                     (d.get('device_type'),d.get('device_name',''),d.get('client_name',''),d.get('mobile',''),d.get('sim_number',''),d.get('sim_number',''),d.get('gps_type',''),d.get('address',''),d.get('setup_by',''),
                      num(d.get('amount')),calc['subscription'],1 if d.get('subscription_done') else 0,0,d.get('sold_at') or now(),d.get('notes',''),
-                     0,0,calc['sim_cost'],calc['activation_cost'],0,0,calc['subscription_months'],0,calc['billed_subscription_monthly'],calc['total_amount']))
+                     0,0,calc['sim_cost'],calc['activation_cost'],0,0,calc['subscription_months'],0,calc['billed_subscription_monthly'],calc['total_amount'],int(product_id),qty))
+                sale_id=cur.lastrowid
+                cur.execute('UPDATE products SET stock_quantity=stock_quantity-?,updated_at=? WHERE id=?',(qty,now(),int(product_id)))
+                cur.execute('INSERT INTO stock_movements(product_id,movement_type,quantity_delta,reference_table,reference_id,actor_id,actor_username,notes,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
+                    (int(product_id),'vente',-qty,'sales',str(sale_id),u.get('id'),u.get('username',''),'Sortie de stock liée à une vente',now()))
             elif p.startswith('/api/sales/') and p.endswith('/edit'):
                 uid=p.split('/')[-2]
                 if not uid.isdigit(): return self.send_json({'error':'Identifiant de vente invalide'},400)
                 target=cur.execute('SELECT * FROM sales WHERE id=?',(int(uid),)).fetchone()
                 if not target:return self.send_json({'error':'Vente introuvable'},404)
-                # Preserve the hidden commercial parameters while allowing corrections to all visible sale fields.
-                calc_input=dict(target)
-                calc_input.update(d)
+                # Preserve hidden pricing details; restore old stock and deduct the chosen product atomically in this SQLite transaction.
+                calc_input=dict(target); calc_input.update(d)
+                target_product=int(target['product_id']) if target['product_id'] is not None else None
+                new_product=target_product
+                if 'product_id' in d:
+                    new_product=int(d['product_id']) if str(d.get('product_id') or '').isdigit() else None
+                qty=max(1,int(num(d.get('quantity',target['quantity'] or 1)) or 1))
+                if new_product is not None:
+                    prod=cur.execute('SELECT * FROM products WHERE id=?',(new_product,)).fetchone()
+                    if not prod:return self.send_json({'error':'Le produit sélectionné est introuvable.'},404)
+                    same_product=target_product==new_product; same_quantity=int(target['quantity'] or 1)==qty
+                    if not prod['is_active'] and not (same_product and same_quantity):return self.send_json({'error':'Ce produit est archivé et ne peut pas être utilisé pour modifier le produit ou la quantité de cette vente.'},409)
+                    if not (same_product and same_quantity):
+                        available=int(prod['stock_quantity']) + (int(target['quantity'] or 1) if same_product else 0)
+                        if available<qty:return self.send_json({'error':f'Stock insuffisant : {available} unité(s) disponible(s) pour cette modification.'},409)
+                        calc_input['amount']=num(prod['selling_price'])*qty
+                    calc_input['device_type']=prod['category'];calc_input['device_name']=prod['product_name']
+                calc_input['quantity']=qty
                 calc=calculate_sale(calc_input)
-                final_amount = float(d['amount']) if str(d.get('amount','')).strip() else target['amount']
-                final_subscription = calc['subscription']
-                cur.execute('''UPDATE sales SET device_type=?,device_name=?,client_name=?,mobile=?,device_phone=?,sim_number=?,gps_type=?,address=?,setup_by=?,amount=?,subscription=?,subscription_done=?,expenses=?,sold_at=?,notes=?,device_price=?,setup_price=?,sim_cost=?,activation_cost=?,benefit=?,next_month_activation=?,subscription_months=?,actual_subscription_monthly=?,billed_subscription_monthly=?,total_amount=? WHERE id=?''',(
-                    d.get('device_type',target['device_type']),d.get('device_name',target['device_name'] or ''),d.get('client_name',target['client_name'] or ''),
+                final_amount=num(calc_input.get('amount',target['amount']))
+                if target_product is not None and (target_product!=new_product or int(target['quantity'] or 1)!=qty):
+                    cur.execute('UPDATE products SET stock_quantity=stock_quantity+?,updated_at=? WHERE id=?',(int(target['quantity'] or 1),now(),target_product))
+                    cur.execute('INSERT INTO stock_movements(product_id,movement_type,quantity_delta,reference_table,reference_id,actor_id,actor_username,notes,created_at) VALUES(?,?,?,?,?,?,?,?,?)',(target_product,'retour_vente',int(target['quantity'] or 1),'sales',str(uid),u.get('id'),u.get('username',''),'Restitution avant modification de vente',now()))
+                if new_product is not None and (target_product!=new_product or int(target['quantity'] or 1)!=qty):
+                    cur.execute('UPDATE products SET stock_quantity=stock_quantity-?,updated_at=? WHERE id=?',(qty,now(),new_product))
+                    cur.execute('INSERT INTO stock_movements(product_id,movement_type,quantity_delta,reference_table,reference_id,actor_id,actor_username,notes,created_at) VALUES(?,?,?,?,?,?,?,?,?)',(new_product,'vente',-qty,'sales',str(uid),u.get('id'),u.get('username',''),'Sortie après modification de vente',now()))
+                cur.execute('''UPDATE sales SET device_type=?,device_name=?,client_name=?,mobile=?,device_phone=?,sim_number=?,gps_type=?,address=?,setup_by=?,amount=?,subscription=?,subscription_done=?,expenses=?,sold_at=?,notes=?,device_price=?,setup_price=?,sim_cost=?,activation_cost=?,benefit=?,next_month_activation=?,subscription_months=?,actual_subscription_monthly=?,billed_subscription_monthly=?,total_amount=?,product_id=?,quantity=? WHERE id=?''',(
+                    calc_input.get('device_type',target['device_type']),calc_input.get('device_name',target['device_name'] or ''),d.get('client_name',target['client_name'] or ''),
                     d.get('mobile',target['mobile'] or ''),d.get('device_phone',target['device_phone'] or ''),d.get('sim_number',target['sim_number'] if 'sim_number' in target.keys() else ''),d.get('gps_type',target['gps_type'] if 'gps_type' in target.keys() else ''),d.get('address',target['address'] or ''),
-                    d.get('setup_by',target['setup_by'] or ''),final_amount,final_subscription,1 if d.get('subscription_done') else 0,
+                    d.get('setup_by',target['setup_by'] or ''),final_amount,calc['subscription'],1 if d.get('subscription_done') else 0,
                     0,d.get('sold_at') or target['sold_at'],d.get('notes',target['notes'] or ''),0,0,
                     calc['sim_cost'],calc['activation_cost'],0,0,calc['subscription_months'],0,
-                    calc['billed_subscription_monthly'],calc['total_amount'],int(uid)))
+                    calc['billed_subscription_monthly'],calc['total_amount'],new_product,qty,int(uid)))
             elif p=='/api/users':
                 if u['role'] not in ('Administrateur','Superadmin'):return self.send_json({'error':'Accès réservé à l’administrateur ou au Superadmin'},403)
                 role=str(d.get('role','')).strip()
@@ -924,7 +1347,10 @@ class API(BaseHTTPRequestHandler):
             audit_details={'endpoint':p,'fields':audit_payload}
             if password_changed: audit_details['password_changed']=True
             cur.execute('INSERT INTO audit(username,action,details,created_at)VALUES(?,?,?,?)',(u['username'],audit_action,json.dumps(audit_details,ensure_ascii=False),now())); c.commit(); return self.send_json({'ok':True})
-        except sqlite3.IntegrityError:return self.send_json({'error':'Ce nom d’utilisateur existe déjà'},400)
+        except sqlite3.IntegrityError:
+            if p.startswith('/api/products'):
+                return self.send_json({'error':'Ce code-barres / QR est déjà associé à un produit.'},409)
+            return self.send_json({'error':'Ce nom d’utilisateur existe déjà'},400)
         except Exception as e:c.rollback(); return self.send_json({'error':str(e)},400)
         finally:c.close()
     def do_DELETE(self):
@@ -933,9 +1359,16 @@ class API(BaseHTTPRequestHandler):
         if cloud_enabled():
             return self.cloud_delete(p,u)
         if not u:return self.send_json({'error':'Non autorisé'},401)
-        c=db()
+        c=db(); cur=c.cursor()
         try:
-            if p.startswith('/api/users/') and p.rsplit('/',1)[-1].isdigit():
+            product_match=re.fullmatch(r'/api/products/([^/]+)',p)
+            if product_match:
+                target=cur.execute('SELECT * FROM products WHERE id=?',(product_match.group(1),)).fetchone()
+                if not target:return self.send_json({'error':'Produit introuvable.'},404)
+                cur.execute('UPDATE products SET is_active=0,updated_at=? WHERE id=?',(now(),product_match.group(1)))
+                cur.execute('INSERT INTO audit(username,action,details,created_at) VALUES(?,?,?,?)',
+                    (u.get('username',''),'Archivage d’un produit',json.dumps({'table':'products','id':product_match.group(1),'before':dict(target)},ensure_ascii=False),now()))
+            elif p.startswith('/api/users/') and p.rsplit('/',1)[-1].isdigit():
                 if u['role'] not in ('Administrateur','Superadmin'):return self.send_json({'error':'Accès réservé à l’administrateur ou au Superadmin'},403)
                 uid=int(p.rsplit('/',1)[-1])
                 if uid==u['id']:return self.send_json({'error':'Vous ne pouvez pas supprimer votre propre compte'},400)
@@ -952,6 +1385,9 @@ class API(BaseHTTPRequestHandler):
                 uid=int(p.rsplit('/',1)[-1]); target=c.execute('SELECT * FROM sales WHERE id=?',(uid,)).fetchone()
                 if not target:return self.send_json({'error':'Vente introuvable'},404)
                 cur.execute('INSERT INTO audit(username,action,details,created_at) VALUES(?,?,?,?)',(u.get('username',''),'Suppression : vente',json.dumps({'table':'sales','id':uid,'before':dict(target)},ensure_ascii=False),now()))
+                if target['product_id'] is not None:
+                    q=max(1,int(target['quantity'] or 1)); cur.execute('UPDATE products SET stock_quantity=stock_quantity+?,updated_at=? WHERE id=?',(q,now(),target['product_id']))
+                    cur.execute('INSERT INTO stock_movements(product_id,movement_type,quantity_delta,reference_table,reference_id,actor_id,actor_username,notes,created_at) VALUES(?,?,?,?,?,?,?,?,?)',(target['product_id'],'retour_vente',q,'sales',str(uid),u.get('id'),u.get('username',''),'Retour en stock après suppression de vente',now()))
                 c.execute('DELETE FROM sales WHERE id=?',(uid,))
             elif p.startswith('/api/deposits/') and p.rsplit('/',1)[-1].isdigit():
                 uid=int(p.rsplit('/',1)[-1]); target=c.execute('SELECT * FROM deposits WHERE id=?',(uid,)).fetchone()
