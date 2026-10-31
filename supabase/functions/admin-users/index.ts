@@ -130,7 +130,7 @@ Deno.serve(async (req: Request) => {
 
       if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return response({ error: "Adresse e-mail invalide." }, 400);
       if (!username || !/^[A-Za-z0-9._-]{2,64}$/.test(username)) return response({ error: "Nom d’utilisateur invalide (2–64 caractères : lettres, chiffres, point, tiret ou souligné)." }, 400);
-      if (password.length < 12) return response({ error: "Le mot de passe doit contenir au moins 12 caractères." }, 400);
+      if (password.length < 6 || password.length > 8) return response({ error: "Le mot de passe d’un employé doit contenir entre 6 et 8 caractères. Les codes uniquement numériques sont acceptés." }, 400);
       if (!regularRoles.has(role)) return response({ error: "Rôle invalide. Le rôle Superadmin ne peut pas être créé depuis le formulaire." }, 400);
       if (username.toLowerCase() === systemSuperadminUsername) {
         return response({ error: "Le nom d’utilisateur destrox est réservé au Superadmin système." }, 409);
@@ -198,7 +198,7 @@ Deno.serve(async (req: Request) => {
       const password = typeof body.password === "string" ? body.password : "";
 
       if (!username || !/^[A-Za-z0-9._-]{2,64}$/.test(username)) return response({ error: "Nom d’utilisateur invalide." }, 400);
-      if (password && password.length < 12) return response({ error: "Le nouveau mot de passe doit contenir au moins 12 caractères." }, 400);
+      if (password && (targetIsProtected ? password.length < 12 || password.length > 72 : password.length < 6 || password.length > 8)) return response({ error: targetIsProtected ? "Le Superadmin doit conserver un mot de passe fort d’au moins 12 caractères." : "Le nouveau mot de passe d’un employé doit contenir entre 6 et 8 caractères. Les codes uniquement numériques sont acceptés." }, 400);
       if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return response({ error: "Adresse e-mail invalide." }, 400);
 
       if (targetIsProtected) {

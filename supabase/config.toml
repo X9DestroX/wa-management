@@ -1,0 +1,4 @@
+# Pre-authentication endpoint: the function itself validates username/password
+# against Supabase Auth before issuing a user session.
+[functions.username-login]
+verify_jwt = false

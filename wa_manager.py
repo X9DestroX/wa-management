@@ -878,15 +878,24 @@ class API(BaseHTTPRequestHandler):
             cfg=load_cloud_config()
             if not cfg.get('enabled'):
                 return self.send_json({'error':cfg.get('error') or 'Configuration cloud absente. Exécutez configure_cloud.bat.'},503)
-            email=str(d.get('email') or d.get('username') or '').strip().lower()
+            identity=str(d.get('identity') or d.get('username') or d.get('email') or '').strip()
             password=str(d.get('password') or '')
-            if '@' not in email:
-                return self.send_json({'error':'Saisissez votre adresse e-mail professionnelle et votre mot de passe.'},400)
+            if not identity or not password:
+                return self.send_json({'error':'Saisissez votre nom d’utilisateur ou votre adresse e-mail, ainsi que votre mot de passe.'},400)
+            username_login = '@' not in identity
             try:
-                session_data=supabase_request('/auth/v1/token?grant_type=password','POST',None,
-                                              {'email':email,'password':password})
+                if not username_login:
+                    login_email=identity.lower()
+                    session_data=supabase_request('/auth/v1/token?grant_type=password','POST',None,
+                                                  {'email':login_email,'password':password})
+                else:
+                    # Username resolution and password verification happen inside the trusted
+                    # Supabase Edge Function. No service-role/secret key is stored on this PC.
+                    session_data=supabase_request('/functions/v1/username-login','POST',None,
+                                                  {'username':identity,'password':password})
+                    login_email=str((session_data or {}).get('user',{}).get('email') or '')
                 if not isinstance(session_data,dict) or not session_data.get('access_token') or not session_data.get('user'):
-                    return self.send_json({'error':'Réponse de connexion Supabase invalide.'},502)
+                    return self.send_json({'error':'Réponse de connexion Supabase invalide. Vérifiez le déploiement du service de connexion.'},502)
                 cloud_session={'cloud_access_token':session_data['access_token'],
                                'cloud_refresh_token':session_data.get('refresh_token','')}
                 uid=session_data['user'].get('id')
@@ -897,14 +906,26 @@ class API(BaseHTTPRequestHandler):
                 if profile.get('role') not in ('RH','Gestionnaire','Administrateur','Superadmin'):
                     return self.send_json({'error':'Votre rôle d’employé est invalide. Contactez l’administrateur.'},403)
                 local_token=secrets.token_urlsafe(32)
+                authenticated_email=str(session_data.get('user',{}).get('email') or login_email or identity).lower()
                 cloud_session.update({'id':profile['id'],'username':profile['username'],'role':profile['role'],
                                       'full_name':profile.get('full_name') or profile['username'],
-                                      'email':email,'created_at':profile.get('created_at','')})
+                                      'email':authenticated_email,'created_at':profile.get('created_at','')})
                 self.sessions[local_token]=cloud_session
                 cloud_auth_event('login',cloud_session)
                 return self.send_json({'token':local_token,'user':cloud_session_user(cloud_session,profile)})
             except CloudAPIError as e:
-                if e.status in (400,401): return self.send_json({'error':'Adresse e-mail ou mot de passe incorrect.'},401)
+                message=str(e)
+                lower=message.lower()
+                if username_login:
+                    if e.status == 404 or 'function not found' in lower or 'not found' in lower and 'username-login' in lower:
+                        return self.send_json({'error':'Le service de connexion par nom d’utilisateur (username-login) n’est pas déployé. Dans Supabase → Edge Functions, créez/déployez username-login.'},503)
+                    if e.status == 401 and any(term in lower for term in ('invalid jwt','invalid token','missing authorization header','authorization header')):
+                        return self.send_json({'error':'Supabase bloque la fonction username-login avant son exécution. Dans Edge Functions → username-login → Details, désactivez « Verify JWT », puis redéployez la fonction.'},503)
+                    if e.status == 503:
+                        return self.send_json({'error':'Le service username-login est indisponible. Vérifiez que la migration SQL 0007 est appliquée et que les secrets Supabase de la fonction sont disponibles, puis redéployez username-login.'},503)
+                    if e.status == 429:
+                        return self.send_json({'error':'Trop de tentatives de connexion. Réessayez dans 15 minutes.'},429)
+                if e.status in (400,401): return self.send_json({'error':'Nom d’utilisateur / adresse e-mail ou mot de passe incorrect.'},401)
                 return cloud_http_error(self,e)
 
         u=self.auth()
@@ -1314,6 +1335,7 @@ class API(BaseHTTPRequestHandler):
                 role=str(d.get('role','')).strip()
                 if role not in ('RH','Gestionnaire','Administrateur'):return self.send_json({'error':'Rôle invalide'},400)
                 if not str(d.get('username','')).strip() or not str(d.get('password','')):return self.send_json({'error':'Nom d’utilisateur et mot de passe obligatoires'},400)
+                if not 6 <= len(str(d.get('password',''))) <= 8:return self.send_json({'error':'Le mot de passe doit contenir entre 6 et 8 caractères.'},400)
                 cur.execute('INSERT INTO users(username,password,role,full_name,created_at)VALUES(?,?,?,?,?)',(d['username'].strip(),hash_password(d['password']),role,d.get('full_name','').strip(),now()))
             elif p.startswith('/api/users/') and p.endswith('/edit'):
                 if u['role'] not in ('Administrateur','Superadmin'):
@@ -1328,6 +1350,7 @@ class API(BaseHTTPRequestHandler):
                 if not username:return self.send_json({'error':'Le nom d’utilisateur est obligatoire'},400)
                 if role not in ('RH','Gestionnaire','Administrateur'):return self.send_json({'error':'Rôle invalide'},400)
                 if d.get('password',''):
+                    if not 6 <= len(str(d.get('password',''))) <= 8:return self.send_json({'error':'Le nouveau mot de passe doit contenir entre 6 et 8 caractères.'},400)
                     cur.execute('UPDATE users SET username=?,password=?,role=?,full_name=? WHERE id=?',(username,hash_password(d['password']),role,full_name,int(uid)))
                 else:
                     cur.execute('UPDATE users SET username=?,role=?,full_name=? WHERE id=?',(username,role,full_name,int(uid)))
